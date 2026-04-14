@@ -16,12 +16,24 @@ from .split import Splitter
 
 
 class DataHub(object):
+
     """
     The DataHub class is responsible for storing and preprocessing data for machine learning tasks.
     It initializes with configuration options to handle different types of tasks such as regression,
     classification, and others. It also supports data scaling and handling molecular data.
     """
-
+    # config = {
+    #     'data_type': 'molecule',
+    #     'remove_hs': False,
+    #     'dict_path': dict_path,
+    #     'batch_size': 8,
+    #     'mode': 'infer',
+    #     'cols': ['smiles'],
+    #     'task': 'repr',
+    #     'target_cols': None,
+    #     'model_name': 'unimolv1',
+    #     'n_confomer':n_confomer
+    # }
     def __init__(self, data=None, is_train=True, save_path=None, **params):
         """
         Initializes the DataHub instance with data and configuration for the ML task.
@@ -53,7 +65,11 @@ class DataHub(object):
         :param params: Additional parameters for data processing.
         :raises ValueError: If the task type is unknown.
         """
+        print("type(self.raw_data) =", type(self.raw_data))
         self.data = MolDataReader().read_data(self.raw_data, self.is_train, **params)
+        # print(self.data.items())
+        print(self.data.keys())
+
         self.data['target_scaler'] = TargetScaler(
             self.ss_method, self.task, self.save_path
         )
@@ -94,6 +110,7 @@ class DataHub(object):
             self.data['target'] = self.data['raw_target']
         else:
             raise ValueError('Unknown task: {}'.format(self.task))
+        # print(self.data)
 
         if params.get('model_name', None) == 'unimolv1':
             if 'mols' in self.data:
@@ -105,6 +122,7 @@ class DataHub(object):
                 )
                 mols = None
             else:
+                print("true")
                 smiles_list = self.data["smiles"]
                 no_h_list, mols = ConformerGen(**params).transform(smiles_list)
         elif params.get('model_name', None) == 'unimolv2':
@@ -119,7 +137,9 @@ class DataHub(object):
             else:
                 smiles_list = self.data["smiles"]
                 no_h_list, mols = UniMolV2Feature(**params).transform(smiles_list)
-
+        print(type(no_h_list))
+        print(len(no_h_list))           # số conformers
+        print(no_h_list[0].keys())      # các trường trong mỗi conformer
         self.data['unimol_input'] = no_h_list
 
         if mols is not None:

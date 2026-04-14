@@ -37,7 +37,7 @@ class Trainer(object):
         self.task = params.get('task', None)
 
         if self.task != 'repr':
-            self.metrics_str = params['metrics']
+            self.metrics_str = params.get('metrics', 'none')
             self.metrics = Metrics(self.task, self.metrics_str)
         self._init_trainer(**params)
 

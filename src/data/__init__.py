@@ -1,16 +1,18 @@
 """Data loading and preprocessing module."""
 
-from .scaffold_split import scaffold_split_dataframe, generate_scaffold_split
+from .splitters import random_scaffold_split, random_split, generate_scaffold, Splitter
 from .data_loader import (
-    prepare_dataset, 
-    save_splits, 
-    load_config, 
+    prepare_dataset,
+    save_splits,
+    load_config,
     DatasetLoader
 )
 
 __all__ = [
-    'scaffold_split_dataframe',
-    'generate_scaffold_split', 
+    'random_scaffold_split',
+    'random_split',
+    'generate_scaffold',
+    'Splitter',
     'prepare_dataset',
     'save_splits',
     'load_config',

@@ -217,6 +217,8 @@ class UniMolModel(nn.Module):
         ) = self.encoder(x, padding_mask=padding_mask, attn_mask=graph_attn_bias)
         cls_repr = encoder_rep[:, 0, :]  # CLS token repr
         all_repr = encoder_rep[:, :, :]  # all token repr
+        # print("DEBUG encoder_rep shape:", encoder_rep.shape)
+
 
         if return_repr:
             filtered_tensors = []

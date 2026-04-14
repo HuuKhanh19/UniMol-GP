@@ -103,41 +103,50 @@ class UniMolRepr(object):
         :return: dict of molecular representation.
         """
 
-        if isinstance(data, str):
-            if data.endswith('.sdf'):
-                # Datahub will process sdf file.
-                pass
-            elif data.endswith('.csv'):
-                # read csv file.
-                data = pd.read_csv(data)
-                assert 'SMILES' in data.columns
-                data = data['SMILES'].values
-            else:
-                # single smiles string.
-                data = [data]
-                data = np.array(data)
-        elif isinstance(data, dict):
-            # custom conformers, should take atoms and coordinates as input.
-            assert 'atoms' in data and 'coordinates' in data
-        elif isinstance(data, list):
-            # list of smiles strings.
-            assert isinstance(data[-1], str)
-            data = np.array(data)
-        else:
-            raise ValueError('Unknown data type: {}'.format(type(data)))
 
-        datahub = DataHub(
-            data=data,
-            task='repr',
-            is_train=False,
-            **self.params,
-        )
-        dataset = MolDataset(datahub.data['unimol_input'])
+        # if isinstance(data, str):
+        #     if data.endswith('.sdf'):
+        #         # Datahub will process sdf file.
+        #         pass
+        #     elif data.endswith('.csv'):
+        #         # read csv file.
+        #         data = pd.read_csv(data)
+        #         assert 'SMILES' in data.columns
+        #         data = data['SMILES'].values
+        #     else:
+        #         # single smiles string.
+        #         data = [data]
+        #         data = np.array(data)
+        # elif isinstance(data, dict):
+        #     # custom conformers, should take atoms and coordinates as input.
+        #     print(11)
+        #     assert 'atoms' in data and 'coordinates' in data 
+        # elif isinstance(data, list):
+        #     # list of smiles strings.
+        #     assert isinstance(data[-1], str)
+        #     data = np.array(data)
+        # else:
+        #     raise ValueError('Unknown data type: {}'.format(type(data)))
+
+        # datahub = DataHub(
+        #     data=data,
+        #     task='repr',
+        #     is_train=False,
+        #     **self.params,
+        # )
+        
+        dataset = MolDataset(data)
+        print(3)
         self.trainer = Trainer(task='repr', **self.params)
-        repr_output = self.trainer.inference(
-            self.model,
-            return_repr=True,
-            return_atomic_reprs=return_atomic_reprs,
-            dataset=dataset,
-        )
-        return repr_output
+        print(2)
+        try:    
+            repr_output = self.trainer.inference(
+                self.model,
+                return_repr=True,
+                return_atomic_reprs=return_atomic_reprs,
+                dataset=dataset,
+            )
+            return repr_output
+        except Exception as e:
+            print(f"❌ Lỗi khi lấy repr: {e}")
+            return None

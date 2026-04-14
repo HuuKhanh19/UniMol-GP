@@ -3,6 +3,8 @@ UniMol Model Wrapper
 
 Wrapper for UniMol-tools v1 to provide a consistent interface.
 This will be extended in Step 2 (EGGROLL) and Step 3 (GP).
+
+UPDATED: No k-fold. Passes explicit train/valid split via VALID column.
 """
 
 import os
@@ -31,19 +33,6 @@ class UniMolWrapper:
         save_path: str = "./experiments",
         random_seed: int = 42
     ):
-        """
-        Initialize UniMol wrapper.
-        
-        Args:
-            task_type: 'regression' or 'classification'
-            use_gpu: Whether to use GPU
-            epochs: Training epochs
-            batch_size: Batch size
-            learning_rate: Learning rate
-            early_stopping_patience: Patience for early stopping
-            save_path: Path to save models and results
-            random_seed: Random seed
-        """
         self.task_type = task_type
         self.use_gpu = use_gpu
         self.epochs = epochs
@@ -64,11 +53,15 @@ class UniMolWrapper:
         target_column: str = "target"
     ) -> Dict[str, Any]:
         """
-        Train UniMol model.
+        Train UniMol model with explicit train/valid split (no k-fold).
+        
+        Combines train and valid DataFrames into a single CSV with a VALID
+        column (0=train, 1=valid). The modified DataHub._init_split() will
+        use this column to create the correct split_nfolds.
         
         Args:
             train_data: Training DataFrame
-            valid_data: Validation DataFrame (used for monitoring only, not for training)
+            valid_data: Validation DataFrame (used for early stopping)
             smiles_column: Name of SMILES column
             target_column: Name of target column
             
@@ -76,35 +69,37 @@ class UniMolWrapper:
             Training results dictionary
         """
         from unimol_tools import MolTrain
-        import os
         
-        # Only use train data for training (no k-fold)
-        train_data = train_data.copy()
+        # Prepare train data
+        train_df = train_data[[smiles_column, target_column]].copy()
+        train_df.columns = ['SMILES', 'TARGET']
+        train_df['VALID'] = 0
         
-        # Rename columns to match UniMol expected format
-        train_data = train_data.rename(columns={
-            smiles_column: 'SMILES',
-            target_column: 'TARGET'
-        })
+        # Prepare valid data
+        valid_df = valid_data[[smiles_column, target_column]].copy()
+        valid_df.columns = ['SMILES', 'TARGET']
+        valid_df['VALID'] = 1
         
-        # Save to temporary CSV file
+        # Combine into single CSV
+        combined = pd.concat([train_df, valid_df], ignore_index=True)
+        
         os.makedirs(self.save_path, exist_ok=True)
         temp_csv_path = os.path.join(self.save_path, 'train_data.csv')
-        train_data.to_csv(temp_csv_path, index=False)
+        combined.to_csv(temp_csv_path, index=False)
         
         # Create MolTrain instance
-        # kfold=1 means no cross-validation, all data used for training
-        # No early stopping with kfold=1, so we use fixed epochs
+        # kfold=1 triggers our custom split logic in DataHub._init_split()
+        # which detects the VALID column and uses it directly
         trainer = MolTrain(
             task=self.task_type,
             data_type='molecule',
             epochs=self.epochs,
             batch_size=self.batch_size,
             learning_rate=self.learning_rate,
-            early_stopping=self.early_stopping_patience,  # Won't work with kfold=1
+            early_stopping=self.early_stopping_patience,
             metrics='mse' if self.task_type == 'regression' else 'auc',
-            split='random',  # Doesn't matter with kfold=1
-            kfold=1,  # No cross-validation, train on all data
+            split='random',
+            kfold=1,
             save_path=self.save_path,
             use_cuda=self.use_gpu,
             remove_hs=True,
@@ -112,7 +107,7 @@ class UniMolWrapper:
             target_cols='TARGET'
         )
         
-        # Fit the model with CSV file path
+        # Fit the model
         trainer.fit(temp_csv_path)
         
         self.model = trainer
@@ -136,20 +131,18 @@ class UniMolWrapper:
             Predictions array
         """
         from unimol_tools import MolPredict
-        import os
         
-        # Prepare data - save to temp CSV
+        # Prepare data
         temp_data = data[[smiles_column]].copy()
         temp_data.columns = ['SMILES']
         
         temp_csv_path = os.path.join(self.save_path, 'predict_data.csv')
         temp_data.to_csv(temp_csv_path, index=False)
         
-        # Load predictor and predict (only model_0 exists with kfold=1)
+        # Load predictor and predict
         predictor = MolPredict(load_model=self.save_path)
         predictions = predictor.predict(temp_csv_path)
         
-        # predictions is a dict with 'predict' key
         if isinstance(predictions, dict):
             pred_values = predictions.get('predict', predictions)
         else:
@@ -165,14 +158,6 @@ class UniMolWrapper:
     ) -> Dict[str, float]:
         """
         Evaluate model on data.
-        
-        Args:
-            data: DataFrame with SMILES and targets
-            smiles_column: SMILES column name
-            target_column: Target column name
-            
-        Returns:
-            Dictionary with evaluation metrics
         """
         predictions = self.predict(data, smiles_column)
         targets = data[target_column].values
@@ -208,7 +193,7 @@ class Step1Trainer:
     Step 1 Trainer: Baseline UniMol with Gradient Descent.
     
     This is the standard training procedure using UniMol's default
-    gradient descent optimization.
+    gradient descent optimization. No k-fold — uses explicit train/valid split.
     """
     
     def __init__(
@@ -216,20 +201,11 @@ class Step1Trainer:
         config: Dict[str, Any],
         experiment_name: str = "step1_baseline"
     ):
-        """
-        Initialize Step 1 trainer.
-        
-        Args:
-            config: Configuration dictionary
-            experiment_name: Name for this experiment
-        """
         self.config = config
         self.experiment_name = experiment_name
         
-        # Extract settings
         task_type = config['dataset']['task_type']
         
-        # Create output directory
         output_dir = os.path.join(
             config['experiment']['output_dir'],
             experiment_name,
@@ -237,7 +213,6 @@ class Step1Trainer:
         )
         os.makedirs(output_dir, exist_ok=True)
         
-        # Initialize wrapper
         self.wrapper = UniMolWrapper(
             task_type=task_type,
             use_gpu=config['unimol']['use_gpu'],
@@ -259,7 +234,7 @@ class Step1Trainer:
         valid_data: pd.DataFrame,
         test_data: pd.DataFrame,
         smiles_column: str = "smiles",
-        target_column: str = "measured"
+        target_column: str = "target"
     ) -> Dict[str, Any]:
         """
         Run complete training and evaluation pipeline.
@@ -281,7 +256,7 @@ class Step1Trainer:
         print(f"Metric: {self.metric_name}")
         print(f"{'='*60}\n")
         
-        # Train
+        # Train with explicit valid set
         print("Training...")
         self.wrapper.train(
             train_data, 

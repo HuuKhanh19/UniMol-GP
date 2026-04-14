@@ -10,7 +10,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 
-from .scaffold_split import scaffold_split_dataframe
+from .splitters import random_scaffold_split
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -224,7 +224,7 @@ def prepare_dataset(
         dataset_name: Name of the dataset (e.g., 'esol', 'bace')
         base_config_path: Path to base config
         dataset_config_dir: Directory with dataset configs
-        random_seed: Random seed for splitting
+        random_seed: Random seed for splitting (split_seed)
         
     Returns:
         Tuple of (train_df, valid_df, test_df, config)
@@ -271,16 +271,27 @@ def prepare_dataset(
     df = preprocess_dataset(df, smiles_col, target_col, task_type)
     print(f"After preprocessing: {len(df)} molecules")
     
-    # Scaffold split (using standardized column names now)
+    # Scaffold split using splitters.random_scaffold_split (original logic)
     split_ratio = config['data']['split_ratio']
-    train_df, valid_df, test_df = scaffold_split_dataframe(
-        df,
-        smiles_column='smiles',  # Standardized name
-        frac_train=split_ratio[0],
-        frac_valid=split_ratio[1],
-        frac_test=split_ratio[2],
-        random_seed=random_seed
+    # split_ratio = [frac_train, frac_valid, frac_test] e.g. [0.8, 0.1, 0.1]
+    ratio_test = split_ratio[2]
+    ration_valid = split_ratio[1]
+    
+    smiles_list = df['smiles'].tolist()
+    
+    train_df, valid_df, test_df = random_scaffold_split(
+        dataset=df,
+        smiles_list=smiles_list,
+        random_seed=random_seed,
+        ratio_test=ratio_test,
+        ration_valid=ration_valid,
+        dataframe=True,
     )
+    
+    # Reset index for clean DataFrames
+    train_df = train_df.reset_index(drop=True)
+    valid_df = valid_df.reset_index(drop=True)
+    test_df = test_df.reset_index(drop=True)
     
     print(f"Split sizes - Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
     
@@ -313,9 +324,6 @@ def save_splits(
     
     return train_path, valid_path, test_path
 
-"""
-Add this class to the END of your existing src/data/data_loader.py file
-"""
 
 class DatasetLoader:
     """
@@ -385,15 +393,23 @@ class DatasetLoader:
         df = preprocess_dataset(df, smiles_col, target_col, task_type)
         print(f"After preprocessing: {len(df)} molecules")
         
-        # Scaffold split
-        train_df, valid_df, test_df = scaffold_split_dataframe(
-            df,
-            smiles_column='smiles',
-            frac_train=self.split_ratio[0],
-            frac_valid=self.split_ratio[1],
-            frac_test=self.split_ratio[2],
-            random_seed=self.random_seed
+        # Scaffold split using splitters.random_scaffold_split
+        ratio_test = self.split_ratio[2]
+        ration_valid = self.split_ratio[1]
+        smiles_list = df['smiles'].tolist()
+        
+        train_df, valid_df, test_df = random_scaffold_split(
+            dataset=df,
+            smiles_list=smiles_list,
+            random_seed=self.random_seed,
+            ratio_test=ratio_test,
+            ration_valid=ration_valid,
+            dataframe=True,
         )
+        
+        train_df = train_df.reset_index(drop=True)
+        valid_df = valid_df.reset_index(drop=True)
+        test_df = test_df.reset_index(drop=True)
         
         print(f"Split sizes - Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
         

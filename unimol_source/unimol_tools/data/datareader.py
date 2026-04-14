@@ -24,6 +24,7 @@ class MolDataReader(object):
         # 1. add anomaly detection & outlier removal.
         # 2. add support for other file format.
         # 3. add support for multi tasks.
+        # print("type(data) =", type(data))
 
         """
         Reads and preprocesses molecular data from various input formats for model training or prediction.

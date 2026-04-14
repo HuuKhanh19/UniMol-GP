@@ -6,12 +6,13 @@ data:
   processed_dir: "data/processed"
   split_ratio: [0.8, 0.1, 0.1]  # train/valid/test
   split_method: "scaffold"
-  random_seed: 42
+  random_seed: 42       # Training seed (model init, dropout, etc.) - FIXED
+  split_seed: 1         # Scaffold split seed - change to 0,1,2,3,4 for different splits
 
 # UniMol settings
 unimol:
   use_gpu: true
-  conformer_num: 10
+  conformer_num: 1
   
 # Training settings (Step 1 - Gradient Descent)
 training:
