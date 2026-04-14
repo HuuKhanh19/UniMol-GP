@@ -1,0 +1,27 @@
+# CONAN Project Requirements
+
+# Core dependencies
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+pyyaml>=6.0
+
+# PyTorch (install separately based on CUDA version)
+# torch>=1.10.0
+
+# Chemistry
+rdkit>=2022.03.1
+
+# UniMol dependencies (handled by unimol_tools setup.py)
+# transformers
+# huggingface_hub
+
+# Logging and utilities
+tqdm>=4.62.0
+
+# For Step 2 (EGGROLL) - to be added
+# evotorch
+
+# For Step 3 (GP) - to be added  
+# gplearn
+# deap

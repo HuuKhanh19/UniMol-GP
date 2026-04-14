@@ -1,0 +1,17 @@
+# Lipophilicity Dataset Configuration
+
+dataset:
+  name: "lipo"
+  file: "refined_Lipophilicity.csv"
+  smiles_column: "smiles"
+  target_column: "measured"
+  task_type: "regression"
+  metric: "rmse"
+
+# EGGROLL settings for this dataset (optional overrides)
+# Full-batch mode: uses entire training set (~3360 samples)
+# No batch_size needed - removed for full-batch training
+  
+# Expected baseline performance
+expected:
+  rmse: 0.62

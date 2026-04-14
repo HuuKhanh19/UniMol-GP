@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+data/processed/
+experiments/
+*.pkl
+*.pt
+*.pth
+*.log
+
+# Keep raw data structure
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!experiments/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
