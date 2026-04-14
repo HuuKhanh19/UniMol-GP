@@ -1,0 +1,9 @@
+# UniMol-GP — Tunable hyperparameters (finetune here)
+# Priority: CLI > config.yaml > script defaults
+
+split_seed: 2
+n_confomer: 1
+epochs: 100
+batch_size: 32
+learning_rate: 0.0001
+patience: 10

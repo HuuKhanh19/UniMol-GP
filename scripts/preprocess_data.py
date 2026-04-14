@@ -1,126 +1,67 @@
 #!/usr/bin/env python
 """
-Preprocess Data Script
-
-Loads raw CSV files, applies random scaffold split, and saves processed splits.
-Reads split_seed from configs/base.yaml.
+Preprocess: scaffold-split raw data into train/valid/test.
 
 Usage:
-    # Set split_seed in configs/base.yaml, then:
-    python scripts/preprocess_data.py --dataset esol
+    python scripts/preprocess_data.py --dataset esol --split-seed 0
+    python scripts/preprocess_data.py --dataset esol --split-seed 0 1 2 3 4
+    python scripts/preprocess_data.py --dataset all --split-seed 0 1 2 3 4
 """
 
-import os
-import sys
-import argparse
+import os, sys, argparse, yaml
 
-# Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from src.data import prepare_dataset, save_splits, load_config
+from src.data import DATASET_NAMES, prepare_dataset
+from src.data.datasets import RAW_DIR, PROCESSED_DIR, SPLIT_RATIO
 
 
-DATASETS = ['esol', 'freesolv', 'lipo', 'bace']
+def load_config(path="config.yaml"):
+    if os.path.exists(path):
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
 
-def preprocess_single_dataset(dataset_name: str, config_dir: str = "configs"):
-    """Preprocess a single dataset using split_seed from config."""
-    base_config_path = os.path.join(config_dir, "base.yaml")
-    dataset_config_dir = os.path.join(config_dir, "datasets")
-
-    # Read split_seed from base.yaml
-    base_config = load_config(base_config_path)
-    split_seed = base_config['data'].get('split_seed', 0)
-
-    print(f"\n{'='*50}")
-    print(f"Processing: {dataset_name.upper()} (split_seed={split_seed})")
-    print(f"{'='*50}")
-
-    # Load and split data with split_seed
-    train_df, valid_df, test_df, config = prepare_dataset(
-        dataset_name,
-        base_config_path=base_config_path,
-        dataset_config_dir=dataset_config_dir,
-        random_seed=split_seed
+def preprocess(dataset_name, split_seed):
+    train_df, valid_df, test_df, _ = prepare_dataset(
+        dataset_name, raw_dir=RAW_DIR,
+        split_ratio=SPLIT_RATIO, split_seed=split_seed,
     )
-
-    # Save splits into seed-specific subdirectory
-    processed_dir = config['data']['processed_dir']
-    seed_dir = os.path.join(processed_dir, f"seed_{split_seed}")
-    os.makedirs(seed_dir, exist_ok=True)
-
-    train_path = os.path.join(seed_dir, f"{dataset_name}_train.csv")
-    valid_path = os.path.join(seed_dir, f"{dataset_name}_valid.csv")
-    test_path = os.path.join(seed_dir, f"{dataset_name}_test.csv")
-
-    train_df.to_csv(train_path, index=False)
-    valid_df.to_csv(valid_path, index=False)
-    test_df.to_csv(test_path, index=False)
-
-    print(f"Saved splits to {seed_dir}/")
-
-    # Also save to root processed_dir for backward compatibility
-    save_splits(train_df, valid_df, test_df, processed_dir, dataset_name)
-
-    return {
-        'train_size': len(train_df),
-        'valid_size': len(valid_df),
-        'test_size': len(test_df),
-        'split_seed': split_seed
-    }
+    # Save to: data/processed/{dataset}/seed_{X}/
+    out_dir = os.path.join(PROCESSED_DIR, dataset_name, f"seed_{split_seed}")
+    os.makedirs(out_dir, exist_ok=True)
+    for name, df in [('train', train_df), ('valid', valid_df), ('test', test_df)]:
+        df.to_csv(os.path.join(out_dir, f"{dataset_name}_{name}.csv"), index=False)
+    print(f"  Saved → {out_dir}/")
+    return len(train_df), len(valid_df), len(test_df)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess molecular datasets")
-    parser.add_argument(
-        '--dataset',
-        type=str,
-        default='all',
-        choices=['all'] + DATASETS,
-        help='Dataset to process (default: all)'
-    )
-    parser.add_argument(
-        '--config-dir',
-        type=str,
-        default='configs',
-        help='Configuration directory'
-    )
+    parser.add_argument('--dataset', type=str, default='all',
+                        choices=['all'] + DATASET_NAMES)
+    parser.add_argument('--split-seed', type=int, nargs='+', default=None)
+    parser.add_argument('--config', type=str, default='config.yaml')
     args = parser.parse_args()
-
-    # Change to project directory
     os.chdir(project_root)
 
-    if args.dataset == 'all':
-        datasets_to_process = DATASETS
-    else:
-        datasets_to_process = [args.dataset]
+    cfg = load_config(args.config)
+    seeds = args.split_seed if args.split_seed is not None else [cfg.get('split_seed', 0)]
+    datasets = DATASET_NAMES if args.dataset == 'all' else [args.dataset]
 
-    # Read split_seed for display
-    base_config = load_config(os.path.join(args.config_dir, "base.yaml"))
-    split_seed = base_config['data'].get('split_seed', 0)
-
-    print("\n" + "="*60)
-    print("CONAN Project - Data Preprocessing")
-    print(f"split_seed: {split_seed} (from configs/base.yaml)")
-    print("="*60)
-
-    results = {}
-    for dataset in datasets_to_process:
-        try:
-            results[dataset] = preprocess_single_dataset(dataset, args.config_dir)
-        except FileNotFoundError as e:
-            print(f"Warning: {e}")
-            print(f"Skipping {dataset} - please upload the raw data file first.")
-            continue
-
-    # Summary
-    print("\n" + "="*60)
-    print("Preprocessing Complete!")
-    print("="*60)
-    for dataset, stats in results.items():
-        print(f"{dataset} (split_seed={stats['split_seed']}): "
-              f"Train={stats['train_size']}, Valid={stats['valid_size']}, Test={stats['test_size']}")
+    print(f"\nPreprocessing | datasets={datasets} | seeds={seeds}")
+    print("=" * 60)
+    for ds in datasets:
+        for seed in seeds:
+            print(f"\n{ds.upper()} (split_seed={seed})")
+            try:
+                n_tr, n_va, n_te = preprocess(ds, seed)
+                print(f"  Train={n_tr}, Valid={n_va}, Test={n_te}")
+            except FileNotFoundError as e:
+                print(f"  Skipped: {e}")
+    print(f"\n{'='*60}\nDone.")
 
 
 if __name__ == "__main__":

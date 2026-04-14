@@ -1,209 +1,209 @@
 #!/usr/bin/env python
 """
-Step 1: Baseline UniMol Training
+Step 1: Baseline UniMol Training (Gradient Descent).
 
-Train UniMol with standard gradient descent on molecular property prediction tasks.
-This establishes the baseline performance for comparison with Steps 2 and 3.
-
-Reads from configs/base.yaml:
-  - split_seed: which scaffold split to use (change to 0,1,2,3,4)
-  - random_seed: training seed (fixed at 42)
+Priority: CLI > config.yaml > DEFAULTS below.
 
 Usage:
-    # Set split_seed in configs/base.yaml, then:
     python scripts/run_step1.py --dataset esol
+    python scripts/run_step1.py --dataset esol --split-seed 2 --epochs 50
+    python scripts/run_step1.py --dataset esol --no-save
+    foreach ($s in 0..4) { python scripts/run_step1.py --dataset esol --split-seed $s }
 """
 
-import os
-import sys
-import argparse
-import json
+import os, sys, argparse, json, yaml
 from datetime import datetime
 
-# Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 import pandas as pd
-from src.data import load_config
+from src.data import DATASET_NAMES, get_dataset_info
+from src.data.datasets import PROCESSED_DIR, OUTPUT_DIR
 from src.models import Step1Trainer
 from src.utils import Timer, print_banner
 
 
-DATASETS = ['esol', 'freesolv', 'lipo', 'bace']
+# ── ALL defaults (single source of truth) ────────────────────────────────
+
+DEFAULTS = {
+    # Tunable (also in config.yaml)
+    'split_seed':       0,
+    'n_confomer':       10,
+    'epochs':           100,
+    'batch_size':       32,
+    'learning_rate':    0.0001,
+    'patience':         10,
+    # Rarely changed (argparser only)
+    'random_seed':      42,
+    'warmup_ratio':     0.03,
+    'max_norm':         5.0,
+    'target_normalize': 'auto',
+    'remove_hs':        True,
+    'use_gpu':          True,
+    'use_amp':          True,
+    'model_name':       'unimolv1',
+    'freeze_layers':    None,
+}
+
+CONFIG_KEYS = {'split_seed', 'n_confomer', 'epochs', 'batch_size',
+               'learning_rate', 'patience'}
 
 
-def run_single_dataset(dataset_name: str, config_dir: str = "configs") -> dict:
-    """
-    Run Step 1 training on a single dataset.
+# ── helpers ──────────────────────────────────────────────────────────────
 
-    Reads split_seed from base.yaml to load the correct data split.
-    Uses random_seed for training (model init, etc.).
+def load_config(path='config.yaml'):
+    if os.path.exists(path):
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
-    Args:
-        dataset_name: Name of the dataset
-        config_dir: Configuration directory
 
-    Returns:
-        Results dictionary
-    """
-    # Load configs
-    base_config_path = os.path.join(config_dir, "base.yaml")
-    dataset_config_path = os.path.join(config_dir, "datasets", f"{dataset_name}.yaml")
-
-    base_config = load_config(base_config_path)
-    dataset_config = load_config(dataset_config_path)
-
-    # Merge configs
-    config = {**base_config, **dataset_config}
-
-    # Read seeds
-    split_seed = config['data'].get('split_seed', 0)
-    train_seed = config['data'].get('random_seed', 42)
-
-    # Load data from seed-specific directory
-    processed_dir = config['data']['processed_dir']
-    seed_dir = os.path.join(processed_dir, f"seed_{split_seed}")
-
-    train_path = os.path.join(seed_dir, f"{dataset_name}_train.csv")
-    valid_path = os.path.join(seed_dir, f"{dataset_name}_valid.csv")
-    test_path = os.path.join(seed_dir, f"{dataset_name}_test.csv")
-
-    # Fallback to root processed_dir if seed dir not found
-    if not all(os.path.exists(p) for p in [train_path, valid_path, test_path]):
-        train_path = os.path.join(processed_dir, f"{dataset_name}_train.csv")
-        valid_path = os.path.join(processed_dir, f"{dataset_name}_valid.csv")
-        test_path = os.path.join(processed_dir, f"{dataset_name}_test.csv")
-
-        if not all(os.path.exists(p) for p in [train_path, valid_path, test_path]):
-            print(f"Error: Preprocessed data not found for {dataset_name} (split_seed={split_seed})")
-            print(f"Please run: python scripts/preprocess_data.py --dataset {dataset_name}")
-            return None
+def resolve_params(args, cfg):
+    """Build final params dict. CLI > config.yaml > DEFAULTS."""
+    params = {}
+    for key, default in DEFAULTS.items():
+        cli_val = getattr(args, key, None)
+        if cli_val is not None:
+            params[key] = cli_val
+        elif key in CONFIG_KEYS and key in cfg:
+            params[key] = cfg[key]
         else:
-            print(f"Warning: seed-specific split not found, using default from {processed_dir}")
+            params[key] = default
+    return params
 
-    train_df = pd.read_csv(train_path)
-    valid_df = pd.read_csv(valid_path)
-    test_df = pd.read_csv(test_path)
 
-    print(f"Loaded data (split_seed={split_seed}, train_seed={train_seed}) "
-          f"- Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
-
-    smiles_col = 'smiles'
-    target_col = 'target'
-
-    # Output dir includes split_seed so different splits don't overwrite
-    experiment_name = f"step1_baseline/seed_{split_seed}"
-
-    # Create trainer — random_seed controls training reproducibility
-    trainer = Step1Trainer(
-        config=config,
-        experiment_name=experiment_name
-    )
-
-    with Timer(f"Training {dataset_name} (split_seed={split_seed}, train_seed={train_seed})"):
-        results = trainer.run(
-            train_df,
-            valid_df,
-            test_df,
-            smiles_column=smiles_col,
-            target_column=target_col
+def load_split(dataset_name, split_seed):
+    """Load from: data/processed/{dataset}/seed_{X}/"""
+    seed_dir = os.path.join(PROCESSED_DIR, dataset_name, f"seed_{split_seed}")
+    paths = {
+        s: os.path.join(seed_dir, f"{dataset_name}_{s}.csv")
+        for s in ('train', 'valid', 'test')
+    }
+    missing = [p for p in paths.values() if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(
+            f"Data not found at {seed_dir}/\n"
+            f"Run: python scripts/preprocess_data.py "
+            f"--dataset {dataset_name} --split-seed {split_seed}"
         )
+    return tuple(pd.read_csv(paths[s]) for s in ('train', 'valid', 'test'))
 
-    if results:
-        results['split_seed'] = split_seed
-        results['train_seed'] = train_seed
 
-    return results
+def set_unimol_log_format():
+    """Simplify UniMol logger output: show only message."""
+    import logging
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(logging.Formatter('%(message)s'))
+    uml = logging.getLogger('unimol')
+    if uml.handlers:
+        for h in uml.handlers:
+            h.setFormatter(logging.Formatter('%(message)s'))
 
+
+# ── main ─────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 1: Baseline UniMol Training"
+        description="Step 1: Baseline UniMol Training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        '--dataset',
-        type=str,
-        default='all',
-        choices=['all'] + DATASETS,
-        help='Dataset to train on (default: all)'
-    )
-    parser.add_argument(
-        '--config-dir',
-        type=str,
-        default='configs',
-        help='Configuration directory'
-    )
+    parser.add_argument('--dataset', type=str, required=True,
+                        choices=DATASET_NAMES)
+    # Tunable (also in config.yaml)
+    parser.add_argument('--split-seed',    type=int,   default=None)
+    parser.add_argument('--n-confomer',    type=int,   default=None)
+    parser.add_argument('--epochs',        type=int,   default=None)
+    parser.add_argument('--batch-size',    type=int,   default=None)
+    parser.add_argument('--learning-rate', type=float, default=None)
+    parser.add_argument('--patience',      type=int,   default=None)
+    # Rarely changed
+    parser.add_argument('--random-seed',      type=int,   default=None)
+    parser.add_argument('--warmup-ratio',     type=float, default=None)
+    parser.add_argument('--max-norm',         type=float, default=None)
+    parser.add_argument('--target-normalize', type=str,   default=None)
+    parser.add_argument('--no-remove-hs',     action='store_true')
+    parser.add_argument('--no-gpu',           action='store_true')
+    parser.add_argument('--no-amp',           action='store_true')
+    parser.add_argument('--model-name',       type=str,   default=None)
+    parser.add_argument('--freeze-layers',    type=str,   default=None)
+    # Experiment
+    parser.add_argument('--no-save', action='store_true',
+                        help='Skip saving results to experiments/')
+    parser.add_argument('--config', type=str, default='config.yaml')
+
     args = parser.parse_args()
 
-    # Change to project directory
+    # Bool flags
+    args.remove_hs = False if args.no_remove_hs else None
+    args.use_gpu   = False if args.no_gpu else None
+    args.use_amp   = False if args.no_amp else None
+
     os.chdir(project_root)
+    cfg = load_config(args.config)
+    params = resolve_params(args, cfg)
+    dataset_info = get_dataset_info(args.dataset)
+    split_seed = params['split_seed']
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # Read seeds for display
-    base_config = load_config(os.path.join(args.config_dir, "base.yaml"))
-    split_seed = base_config['data'].get('split_seed', 0)
-    train_seed = base_config['data'].get('random_seed', 42)
+    # Header
+    print_banner("UniMol-GP — Step 1: Baseline Training")
+    print(f"Time        : {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"Dataset     : {args.dataset} ({dataset_info['task_type']}, {dataset_info['metric']})")
+    print(f"split_seed  : {split_seed}")
+    print(f"random_seed : {params['random_seed']}")
+    print(f"n_confomer  : {params['n_confomer']}")
+    print(f"epochs      : {params['epochs']}")
+    print(f"batch_size  : {params['batch_size']}")
+    print(f"lr          : {params['learning_rate']}")
+    print(f"patience    : {params['patience']}")
+    print(f"warmup      : {params['warmup_ratio']}")
+    print(f"max_norm    : {params['max_norm']}")
+    print(f"normalize   : {params['target_normalize']}")
+    print(f"remove_hs   : {params['remove_hs']}")
+    print(f"GPU/AMP     : {params['use_gpu']}/{params['use_amp']}")
+    if not args.no_save:
+        print(f"Save to     : {OUTPUT_DIR}/{args.dataset}/seed_{split_seed}/{timestamp}/")
 
-    print_banner("CONAN Project - Step 1: Baseline Training")
-    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"split_seed: {split_seed}  (scaffold split)")
-    print(f"train_seed: {train_seed}  (model training)")
+    # Load data
+    train_df, valid_df, test_df = load_split(args.dataset, split_seed)
+    print(f"\nData — Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
 
-    if args.dataset == 'all':
-        datasets = DATASETS
+    # Experiment path: experiments/{dataset}/seed_{X}/{timestamp}
+    experiment_name = f"{args.dataset}/seed_{split_seed}/{timestamp}"
+
+    trainer = Step1Trainer(
+        params=params,
+        dataset_info=dataset_info,
+        experiment_name=experiment_name,
+    )
+
+    # Clean UniMol logs
+    set_unimol_log_format()
+
+    with Timer(f"Training {args.dataset} (split_seed={split_seed})"):
+        results = trainer.run(train_df, valid_df, test_df)
+
+    if results is None:
+        sys.exit(1)
+
+    results['split_seed'] = split_seed
+    results['train_seed'] = params['random_seed']
+    results['timestamp'] = timestamp
+    results['params'] = params
+
+    # Save
+    if not args.no_save:
+        out_dir = os.path.join(OUTPUT_DIR, args.dataset,
+                               f"seed_{split_seed}", timestamp)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, 'results.json'), 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"Results saved → {out_dir}/results.json")
     else:
-        datasets = [args.dataset]
+        print("(--no-save: results not saved)")
 
-    all_results = {}
-
-    for dataset in datasets:
-        print(f"\n{'='*60}")
-        print(f"Dataset: {dataset.upper()}")
-        print(f"{'='*60}\n")
-
-        try:
-            results = run_single_dataset(dataset, args.config_dir)
-            if results:
-                all_results[dataset] = results
-        except Exception as e:
-            print(f"Error training {dataset}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-
-    # Print final summary
-    print_banner("Final Summary - Step 1 Baseline Results")
-
-    print("\n" + "-"*75)
-    print(f"{'Dataset':<12} {'Task':<14} {'Metric':<8} {'Test Score':<12} "
-          f"{'Split Seed':<12} {'Train Seed':<12}")
-    print("-"*75)
-
-    for dataset, results in all_results.items():
-        task = results['task_type']
-        metric = results['metric']
-        s_seed = results.get('split_seed', 'N/A')
-        t_seed = results.get('train_seed', 'N/A')
-        test_score = results['test'].get(metric, 'N/A')
-        if isinstance(test_score, float):
-            print(f"{dataset:<12} {task:<14} {metric:<8} {test_score:<12.4f} "
-                  f"{s_seed:<12} {t_seed:<12}")
-        else:
-            print(f"{dataset:<12} {task:<14} {metric:<8} {test_score:<12} "
-                  f"{s_seed:<12} {t_seed:<12}")
-
-    print("-"*75)
-
-    # Save results
-    output_dir = os.path.join("experiments", "step1_baseline", f"seed_{split_seed}")
-    os.makedirs(output_dir, exist_ok=True)
-
-    summary_path = os.path.join(output_dir, "summary.json")
-    with open(summary_path, 'w') as f:
-        json.dump(all_results, f, indent=2)
-
-    print(f"\nResults saved to: {summary_path}")
-    print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"End: {datetime.now():%Y-%m-%d %H:%M:%S}")
 
 
 if __name__ == "__main__":
