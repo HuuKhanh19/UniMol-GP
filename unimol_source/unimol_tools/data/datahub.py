@@ -65,10 +65,10 @@ class DataHub(object):
         :param params: Additional parameters for data processing.
         :raises ValueError: If the task type is unknown.
         """
-        print("type(self.raw_data) =", type(self.raw_data))
+        # print("type(self.raw_data) =", type(self.raw_data))
         self.data = MolDataReader().read_data(self.raw_data, self.is_train, **params)
         # print(self.data.items())
-        print(self.data.keys())
+        # print(self.data.keys())
 
         self.data['target_scaler'] = TargetScaler(
             self.ss_method, self.task, self.save_path
@@ -122,7 +122,7 @@ class DataHub(object):
                 )
                 mols = None
             else:
-                print("true")
+                # print("true")
                 smiles_list = self.data["smiles"]
                 no_h_list, mols = ConformerGen(**params).transform(smiles_list)
         elif params.get('model_name', None) == 'unimolv2':
@@ -137,9 +137,9 @@ class DataHub(object):
             else:
                 smiles_list = self.data["smiles"]
                 no_h_list, mols = UniMolV2Feature(**params).transform(smiles_list)
-        print(type(no_h_list))
-        print(len(no_h_list))           # số conformers
-        print(no_h_list[0].keys())      # các trường trong mỗi conformer
+        # print(type(no_h_list))
+        # print(len(no_h_list))           # số conformers
+        # print(no_h_list[0].keys())      # các trường trong mỗi conformer
         self.data['unimol_input'] = no_h_list
 
         if mols is not None:
