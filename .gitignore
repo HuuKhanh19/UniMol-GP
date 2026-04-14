@@ -1,95 +1,44 @@
-# =============================================================================
-# Python
-# =============================================================================
+# Cache & build
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
 *.egg-info/
-dist/
 build/
-eggs/
-*.egg
+dist/
 
-# Virtual environments
-venv/
-ENV/
-env/
-.conda/
-
-# =============================================================================
-# IDE
-# =============================================================================
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# =============================================================================
-# OS
-# =============================================================================
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# =============================================================================
-# Data & Experiments (generated outputs)
-# =============================================================================
-data/processed/
-experiments/
-*.log
-
-# Keep directory structure
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!experiments/.gitkeep
-
-# =============================================================================
-# Model weights & large binary files
-# =============================================================================
+# Model weights & checkpoints
 *.pt
 *.pth
 *.pkl
 *.ckpt
 *.bin
 
-# =============================================================================
-# Generated data files
-# =============================================================================
+# Data files (heavy)
 *.csv
 *.sdf
-*.mol2
 *.h5
-*.hdf5
 *.npy
 *.npz
+
+# Logs & temp
+*.log
 *.dat
 *.result
 *.data
-
-
-
-# =============================================================================
-# UniMol source — track ALL code, ignore only artifacts
-# =============================================================================
-# Pretrained weights (large, download separately)
-unimol_source/unimol_tools/weights/
-
-# Build artifacts
-unimol_source/*.egg-info/
-unimol_source/build/
-unimol_source/dist/
-
-# =============================================================================
-# Jupyter
-# =============================================================================
-.ipynb_checkpoints/
-
-# =============================================================================
-# Misc
-# =============================================================================
 *.bak
 *.tmp
+
+# Virtual env
+venv/
+env/
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 .env
+
+# Always keep .gitkeep (to preserve empty directory structure)
+!.gitkeep
+experiments/
+logs/
