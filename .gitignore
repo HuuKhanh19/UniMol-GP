@@ -28,6 +28,7 @@ experiments/
 *.pt
 *.pth
 *.log
+*.csv
 
 # Keep raw data structure
 !data/raw/.gitkeep
