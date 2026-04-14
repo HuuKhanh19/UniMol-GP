@@ -37,6 +37,7 @@ desktop.ini
 # =============================================================================
 # Data & Experiments (generated outputs)
 # =============================================================================
+data/raw
 data/processed/
 experiments/
 *.log
@@ -68,9 +69,6 @@ experiments/
 *.dat
 *.result
 *.data
-
-# BUT keep raw data CSVs
-!data/raw/*.csv
 
 # =============================================================================
 # UniMol source — track ALL code, ignore only artifacts
