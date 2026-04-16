@@ -1,9 +1,25 @@
-# UniMol-GP — Tunable hyperparameters (finetune here)
+# UniMol-GP -- Tunable hyperparameters (finetune here)
 # Priority: CLI > config.yaml > script defaults
 
-split_seed: 2
+# Shared (all steps)
+split_seed: 4
 n_confomer: 1
+gpu_id: 0
+
+# Step 1 -- Gradient Descent
 epochs: 100
 batch_size: 32
 learning_rate: 0.0001
 patience: 10
+
+# Step 2 -- EGGROLL
+eggroll:
+  population_size: 32
+  rank: 16
+  sigma: 0.01
+  learning_rate: 0.1
+  num_generations: 800
+  patience: 200
+  eval_chunk_size: 64
+  lr_decay: 0.99
+  sigma_decay: 0.99

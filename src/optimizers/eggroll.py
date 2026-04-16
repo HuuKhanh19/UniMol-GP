@@ -267,7 +267,7 @@ class EGGROLL:
         print(f"EGGROLL: {len(self.param_names)} param groups, "
               f"{total_params:,} trainable params")
         print(f"  N={self.config.population_size}, r={self.config.rank}, "
-              f"σ={self.config.sigma}, α={self.config.learning_rate}")
+              f"sigma={self.config.sigma}, lr={self.config.learning_rate}")
         if self.config.rank_transform:
             print(f"  Fitness shaping: rank_transform (centered={self.config.centered_rank})")
         elif self.config.normalize_fitness:

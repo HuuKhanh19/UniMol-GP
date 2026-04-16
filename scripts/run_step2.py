@@ -1,302 +1,205 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
-Step 2: Train UniMol with EGGROLL Evolution Strategies
+Step 2: Train UniMol end-to-end with EGGROLL Evolution Strategies.
 
-This script replaces gradient descent with EGGROLL for training UniMol models.
-UPDATED: Uses full-batch fitness evaluation (no mini-batch option).
+Priority: CLI > config.yaml > DEFAULTS below.
 
 Usage:
     python scripts/run_step2.py --dataset esol
-    python scripts/run_step2.py --dataset all
-    python scripts/run_step2.py --dataset esol --population_size 32 --rank 16
+    python scripts/run_step2.py --dataset esol --split-seed 2 --sigma 0.005
+    python scripts/run_step2.py --dataset esol --gpu-id 1
 """
 
-import os
-import sys
-import argparse
-import json
-import yaml
+import os, sys, argparse, json, yaml, logging
 from datetime import datetime
 
-# Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
+import pandas as pd
+from src.data import DATASET_NAMES, get_dataset_info
+from src.data.datasets import PROCESSED_DIR, OUTPUT_DIR
+from src.trainers.step2_eggroll import Step2Trainer
+from src.utils import Timer, print_banner
 
-def load_config(dataset_name: str) -> dict:
-    """Load and merge base config with dataset-specific config."""
-    base_path = os.path.join(project_root, 'configs', 'base.yaml')
-    dataset_path = os.path.join(project_root, 'configs', 'datasets', f'{dataset_name}.yaml')
-    
-    with open(base_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    if os.path.exists(dataset_path):
-        with open(dataset_path, 'r') as f:
-            dataset_config = yaml.safe_load(f)
-        
-        # Merge dataset config
-        for key, value in dataset_config.items():
-            if key in config and isinstance(config[key], dict) and isinstance(value, dict):
-                config[key].update(value)
-            else:
-                config[key] = value
-    
-    return config
+# ── ALL defaults ─────────────────────────────────────────────────────────
+
+DEFAULTS = {
+    # Shared
+    'split_seed':         0,
+    'random_seed':        42,
+    'gpu_id':             0,
+    'use_gpu':            True,
+    # EGGROLL core (config.yaml eggroll:)
+    'population_size':    32,
+    'rank':               16,
+    'sigma':              0.01,
+    'eggroll_lr':         0.1,
+    'num_generations':    400,
+    'eggroll_patience':   200,
+    'eval_chunk_size':    64,
+    'lr_decay':           0.99,
+    'sigma_decay':        0.99,
+    # EGGROLL advanced
+    'use_antithetic':     True,
+    'normalize_fitness':  True,
+    'rank_transform':     True,
+    'centered_rank':      True,
+    'weight_decay':       0.0,
+}
 
 
-def run_step2(
-    dataset_name: str,
-    population_size: int = None,
-    rank: int = None,
-    sigma: float = None,
-    learning_rate: float = None,
-    num_generations: int = None,
-    eval_chunk_size: int = None,
-    patience: int = None,
-    weight_decay: float = None,
-    rank_transform: bool = None,
-    lr_decay: float = None,
-    sigma_decay: float = None
-):
-    """Run Step 2 EGGROLL training for a dataset."""
-    from src.data.loader import DatasetLoader
-    from src.trainers.step2_eggroll import Step2Trainer
-    
-    print(f"\n{'='*60}")
-    print(f"Step 2: EGGROLL Training (Full-Batch) for {dataset_name}")
-    print(f"Start time: {datetime.now()}")
-    print(f"{'='*60}")
-    
-    # Load config
-    config = load_config(dataset_name)
-    
-    # Override EGGROLL parameters if provided
-    if population_size is not None:
-        config['eggroll']['population_size'] = population_size
-    if rank is not None:
-        config['eggroll']['rank'] = rank
-    if sigma is not None:
-        config['eggroll']['sigma'] = sigma
-    if learning_rate is not None:
-        config['eggroll']['learning_rate'] = learning_rate
-    if num_generations is not None:
-        config['eggroll']['num_generations'] = num_generations
-    if eval_chunk_size is not None:
-        config['eggroll']['eval_chunk_size'] = eval_chunk_size
-    if patience is not None:
-        config['eggroll']['patience'] = patience
-    if weight_decay is not None:
-        config['eggroll']['weight_decay'] = weight_decay
-    if rank_transform is not None:
-        config['eggroll']['rank_transform'] = rank_transform
-    if lr_decay is not None:
-        config['eggroll']['lr_decay'] = lr_decay
-    if sigma_decay is not None:
-        config['eggroll']['sigma_decay'] = sigma_decay
-    
-    # Print EGGROLL config
-    print("\nEGGROLL Configuration (Full-Batch Mode):")
-    for key, value in config['eggroll'].items():
-        print(f"  {key}: {value}")
-    
-    # Load data
-    loader = DatasetLoader(config)
-    train_data, valid_data, test_data = loader.load()
-    
-    print(f"\nData loaded:")
-    print(f"  Train: {len(train_data)} samples (full-batch)")
-    print(f"  Valid: {len(valid_data)} samples")
-    print(f"  Test: {len(test_data)} samples")
-    
-    # Create trainer
-    trainer = Step2Trainer(config, experiment_name="step2_eggroll")
-    
-    # Run training
-    results = trainer.run(
-        train_data=train_data,
-        valid_data=valid_data,
-        test_data=test_data,
-        smiles_column='smiles',  # Standardized by DatasetLoader
-        target_column='target'   # Standardized by DatasetLoader
-    )
-    
-    print(f"\nTraining {dataset_name} completed")
-    print(f"End time: {datetime.now()}")
-    
-    return results
+def load_config(path='config.yaml'):
+    if os.path.exists(path):
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _pick(cli, cfg, default):
+    if cli is not None: return cli
+    if cfg is not None: return cfg
+    return default
+
+
+def resolve_params(args, cfg):
+    ecfg = cfg.get('eggroll', {})
+    params = {}
+    # Shared
+    params['split_seed'] = _pick(args.split_seed, cfg.get('split_seed'), DEFAULTS['split_seed'])
+    params['random_seed'] = _pick(args.random_seed, None, DEFAULTS['random_seed'])
+    params['gpu_id'] = _pick(args.gpu_id, cfg.get('gpu_id'), DEFAULTS['gpu_id'])
+    params['use_gpu'] = DEFAULTS['use_gpu'] if not args.no_gpu else False
+    # EGGROLL
+    params['population_size'] = _pick(args.population_size, ecfg.get('population_size'), DEFAULTS['population_size'])
+    params['rank'] = _pick(args.rank, ecfg.get('rank'), DEFAULTS['rank'])
+    params['sigma'] = _pick(args.sigma, ecfg.get('sigma'), DEFAULTS['sigma'])
+    params['eggroll_lr'] = _pick(args.eggroll_lr, ecfg.get('learning_rate'), DEFAULTS['eggroll_lr'])
+    params['num_generations'] = _pick(args.num_generations, ecfg.get('num_generations'), DEFAULTS['num_generations'])
+    params['eggroll_patience'] = _pick(args.eggroll_patience, ecfg.get('patience'), DEFAULTS['eggroll_patience'])
+    params['eval_chunk_size'] = _pick(args.eval_chunk_size, ecfg.get('eval_chunk_size'), DEFAULTS['eval_chunk_size'])
+    params['lr_decay'] = _pick(args.lr_decay, ecfg.get('lr_decay'), DEFAULTS['lr_decay'])
+    params['sigma_decay'] = _pick(args.sigma_decay, ecfg.get('sigma_decay'), DEFAULTS['sigma_decay'])
+    for k in ('use_antithetic', 'normalize_fitness', 'rank_transform', 'centered_rank', 'weight_decay'):
+        params[k] = DEFAULTS[k]
+    return params
+
+
+def load_split(dataset_name, split_seed):
+    seed_dir = os.path.join(PROCESSED_DIR, dataset_name, f"seed_{split_seed}")
+    paths = {s: os.path.join(seed_dir, f"{dataset_name}_{s}.csv")
+             for s in ('train', 'valid', 'test')}
+    missing = [p for p in paths.values() if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(
+            f"Data not found at {seed_dir}/\n"
+            f"Run: python scripts/preprocess_data.py "
+            f"--dataset {dataset_name} --split-seed {split_seed}")
+    return tuple(pd.read_csv(paths[s]) for s in ('train', 'valid', 'test'))
+
+
+def set_clean_log_format():
+    fmt = logging.Formatter('%(message)s')
+    for name in ['Uni-Mol Tools', 'unimol', '']:
+        lg = logging.getLogger(name)
+        for h in lg.handlers:
+            h.setFormatter(fmt)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 2: Train UniMol with EGGROLL Evolution Strategies (Full-Batch)"
+        description="Step 2: UniMol + EGGROLL Training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        '--dataset',
-        type=str,
-        default='esol',
-        choices=['esol', 'freesolv', 'lipo', 'bace', 'all'],
-        help='Dataset to train on (default: esol)'
-    )
-    parser.add_argument(
-        '--population_size', '-N',
-        type=int,
-        default=None,
-        help='Population size (number of perturbations, default: 32)'
-    )
-    parser.add_argument(
-        '--rank', '-r',
-        type=int,
-        default=None,
-        help='Rank of low-rank perturbations (default: 16)'
-    )
-    parser.add_argument(
-        '--sigma', '-s',
-        type=float,
-        default=None,
-        help='Noise scale for perturbations (default: 0.01)'
-    )
-    parser.add_argument(
-        '--learning_rate', '-lr',
-        type=float,
-        default=None,
-        help='Learning rate (step size, default: 0.1)'
-    )
-    parser.add_argument(
-        '--num_generations', '-g',
-        type=int,
-        default=None,
-        help='Number of evolution generations (default: 400)'
-    )
-    parser.add_argument(
-        '--eval_chunk_size', '-c',
-        type=int,
-        default=None,
-        help='Chunk size for forward pass to avoid OOM (default: 64)'
-    )
-    parser.add_argument(
-        '--patience', '-p',
-        type=int,
-        default=None,
-        help='Early stopping patience (default: 200)'
-    )
-    parser.add_argument(
-        '--weight_decay', '-wd',
-        type=float,
-        default=None,
-        help='Weight decay for regularization (default: 0.0)'
-    )
-    parser.add_argument(
-        '--rank_transform',
-        action='store_true',
-        help='Use rank-based fitness shaping (default: True)'
-    )
-    parser.add_argument(
-        '--no_rank_transform',
-        action='store_true',
-        help='Disable rank-based fitness shaping'
-    )
-    parser.add_argument(
-        '--lr_decay',
-        type=float,
-        default=None,
-        help='Learning rate decay per generation (default: 0.99)'
-    )
-    parser.add_argument(
-        '--sigma_decay',
-        type=float,
-        default=None,
-        help='Sigma decay per generation (default: 0.99)'
-    )
-    
+    parser.add_argument('--dataset', type=str, required=True, choices=DATASET_NAMES)
+    # Shared
+    parser.add_argument('--split-seed',      type=int,   default=None)
+    parser.add_argument('--random-seed',     type=int,   default=None)
+    parser.add_argument('--gpu-id',          type=int,   default=None)
+    parser.add_argument('--no-gpu',          action='store_true')
+    # EGGROLL
+    parser.add_argument('--population-size', type=int,   default=None)
+    parser.add_argument('--rank',            type=int,   default=None)
+    parser.add_argument('--sigma',           type=float, default=None)
+    parser.add_argument('--eggroll-lr',      type=float, default=None)
+    parser.add_argument('--num-generations', type=int,   default=None)
+    parser.add_argument('--eggroll-patience',type=int,   default=None)
+    parser.add_argument('--eval-chunk-size', type=int,   default=None)
+    parser.add_argument('--lr-decay',        type=float, default=None)
+    parser.add_argument('--sigma-decay',     type=float, default=None)
+    # Experiment
+    parser.add_argument('--no-save',         action='store_true')
+    parser.add_argument('--config',          type=str,   default='config.yaml')
+
     args = parser.parse_args()
-    
-    # Handle rank_transform flag
-    rank_transform = None
-    if args.rank_transform:
-        rank_transform = True
-    elif args.no_rank_transform:
-        rank_transform = False
-    
-    # Datasets to run
-    if args.dataset == 'all':
-        datasets = ['esol', 'freesolv', 'lipo', 'bace']
-    else:
-        datasets = [args.dataset]
-    
-    # Run for each dataset
-    all_results = {}
-    
-    for dataset in datasets:
-        try:
-            results = run_step2(
-                dataset,
-                population_size=args.population_size,
-                rank=args.rank,
-                sigma=args.sigma,
-                learning_rate=args.learning_rate,
-                num_generations=args.num_generations,
-                eval_chunk_size=args.eval_chunk_size,
-                patience=args.patience,
-                weight_decay=args.weight_decay,
-                rank_transform=rank_transform,
-                lr_decay=args.lr_decay,
-                sigma_decay=args.sigma_decay
-            )
-            all_results[dataset] = results
-        except Exception as e:
-            print(f"\nError training {dataset}: {e}")
-            import traceback
-            traceback.print_exc()
-            all_results[dataset] = {"error": str(e)}
-    
-    # Print summary
-    print(f"\n{'='*60}")
-    print(f"         Step 2 Summary - EGGROLL Results (Full-Batch)          ")
-    print(f"{'='*60}\n")
-    
-    print("-" * 60)
-    print(f"{'Dataset':<15} {'Task':<15} {'Metric':<10} {'Test Score':<12}")
-    print("-" * 60)
-    
-    for dataset, result in all_results.items():
-        if 'error' in result:
-            print(f"{dataset:<15} ERROR: {result['error'][:30]}")
-        else:
-            task = result.get('task_type', 'unknown')
-            metric = result.get('metric', 'unknown')
-            test_score = result.get('test', {}).get(metric, 0.0)
-            print(f"{dataset:<15} {task:<15} {metric:<10} {test_score:<12.4f}")
-    
-    print("-" * 60)
-    
-    # Save summary only when running multiple datasets
-    if len(datasets) > 1:
-        summary_path = os.path.join(project_root, 'experiments', 'step2_eggroll', 'summary.json')
-        os.makedirs(os.path.dirname(summary_path), exist_ok=True)
-        
-        # Convert for JSON serialization
-        def convert_numpy(obj):
-            import numpy as np
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, (np.float32, np.float64)):
-                return float(obj)
-            elif isinstance(obj, (np.int32, np.int64)):
-                return int(obj)
-            elif isinstance(obj, dict):
-                return {k: convert_numpy(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy(v) for v in obj]
-            return obj
-        
-        all_results = convert_numpy(all_results)
-        
-        with open(summary_path, 'w') as f:
-            json.dump(all_results, f, indent=2)
-        
-        print(f"\nSummary saved to: {summary_path}")
+    os.chdir(project_root)
+    cfg = load_config(args.config)
+
+    # Check n_confomer
+    n_conf = cfg.get('n_confomer', 1)
+    if n_conf > 1:
+        print(f"ERROR: Step 2 (EGGROLL) only supports n_confomer=1, "
+              f"but config.yaml has n_confomer={n_conf}.")
+        sys.exit(1)
+
+    params = resolve_params(args, cfg)
+    dataset_info = get_dataset_info(args.dataset)
+    split_seed = params['split_seed']
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # Header
+    print_banner("UniMol-GP -- Step 2: EGGROLL Training")
+    print(f"Time        : {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"Dataset     : {args.dataset} ({dataset_info['task_type']}, {dataset_info['metric']})")
+    print(f"split_seed  : {split_seed}")
+    print(f"random_seed : {params['random_seed']}")
+    print(f"gpu_id      : {params['gpu_id']}")
+    print(f"--- EGGROLL ---")
+    print(f"N (pop)     : {params['population_size']}")
+    print(f"r (rank)    : {params['rank']}")
+    print(f"sigma       : {params['sigma']}")
+    print(f"lr          : {params['eggroll_lr']}")
+    print(f"Generations : {params['num_generations']}")
+    print(f"Patience    : {params['eggroll_patience']}")
+    print(f"Chunk size  : {params['eval_chunk_size']}")
+    print(f"LR decay    : {params['lr_decay']}")
+    print(f"Sigma decay : {params['sigma_decay']}")
+    if not args.no_save:
+        print(f"Save to     : {OUTPUT_DIR}/step2/{args.dataset}/seed_{split_seed}/{timestamp}/")
+
+    # Load data
+    train_df, valid_df, test_df = load_split(args.dataset, split_seed)
+    print(f"\nData -- Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
+
+    set_clean_log_format()
+
+    # Experiment path: experiments/step2/{dataset}/seed_{X}/{timestamp}
+    experiment_name = f"step2/{args.dataset}/seed_{split_seed}/{timestamp}"
+    trainer = Step2Trainer(
+        params=params, dataset_info=dataset_info, experiment_name=experiment_name,
+    )
+
+    with Timer(f"EGGROLL training {args.dataset} (split_seed={split_seed})"):
+        results = trainer.run(train_df, valid_df, test_df)
+
+    if results is None:
+        sys.exit(1)
+
+    results['split_seed'] = split_seed
+    results['random_seed'] = params['random_seed']
+    results['timestamp'] = timestamp
+    results['params'] = params
+
+    if not args.no_save:
+        out_dir = os.path.join(OUTPUT_DIR, 'step2', args.dataset,
+                               f"seed_{split_seed}", timestamp)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, 'results.json'), 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"Results saved -- {out_dir}/results.json")
+
+    print(f"End: {datetime.now():%Y-%m-%d %H:%M:%S}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

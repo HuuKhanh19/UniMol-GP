@@ -14,7 +14,6 @@ from src.data.datasets import OUTPUT_DIR
 
 
 def _quiet_unimol_logger():
-    """Reduce UniMol log verbosity to message-only."""
     fmt = logging.Formatter('%(message)s')
     for name in ['Uni-Mol Tools', 'unimol', '']:
         lg = logging.getLogger(name)
@@ -23,7 +22,6 @@ def _quiet_unimol_logger():
 
 
 class UniMolWrapper:
-    """Thin wrapper around unimol_tools MolTrain / MolPredict."""
 
     def __init__(self, params: dict, save_path: str):
         self.p = params
@@ -49,6 +47,8 @@ class UniMolWrapper:
         combined.to_csv(csv_path, index=False)
 
         p = self.p
+        gpu_id = p.get('gpu_id', 0)
+
         trainer = MolTrain(
             task=self.task_type,
             data_type='molecule',
@@ -66,14 +66,15 @@ class UniMolWrapper:
             use_cuda=p.get('use_gpu', True),
             use_amp=p.get('use_amp', True),
             use_ddp=False,
+            use_gpu=str(gpu_id),
             model_name=p.get('model_name', 'unimolv1'),
             freeze_layers=p.get('freeze_layers', None),
             smiles_col='SMILES',
             target_cols='TARGET',
         )
 
-        # Pass remaining hypers via config (not exposed in MolTrain __init__)
-        trainer.config.n_confomer = p.get('n_confomer', 10)
+        # Pass remaining hypers via config
+        trainer.config.n_confomer = p.get('n_confomer', 1)
         trainer.config.warmup_ratio = p.get('warmup_ratio', 0.03)
         trainer.config.seed = p.get('random_seed', 42)
 
@@ -107,7 +108,6 @@ class UniMolWrapper:
 
 
 class Step1Trainer:
-    """Step 1: baseline UniMol training with gradient descent."""
 
     def __init__(self, params: dict, dataset_info: dict, experiment_name: str):
         self.params = params
@@ -125,7 +125,7 @@ class Step1Trainer:
             smiles_column='smiles', target_column='target'):
         name = self.dataset_info['name']
         print(f"\n{'='*60}")
-        print(f"Step 1: Baseline Training — {name}")
+        print(f"Step 1: Baseline Training -- {name}")
         print(f"Task: {self.task_type} | Metric: {self.metric}")
         print(f"{'='*60}\n")
 
