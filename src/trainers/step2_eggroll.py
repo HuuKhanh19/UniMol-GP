@@ -25,6 +25,30 @@ def _quiet_unimol_logger():
         for h in lg.handlers:
             h.setFormatter(fmt)
 
+def warm_start_regression_head(model, y_mean):
+    """
+    Set bias của regression head = mean(y_train).
+    Initial prediction ≈ mean(y) → initial MSE ≈ var(y), không phải mean² + var.
+    ES landscape KHÔNG thay đổi — chỉ đổi điểm khởi đầu θ₀.
+    """
+    import torch.nn as nn
+    # Tìm Linear cuối cùng có out_features=1 (regression head)
+    last_linear = None
+    for name, m in model.named_modules():
+        if isinstance(m, nn.Linear) and m.out_features == 1:
+            last_linear = (name, m)
+
+    if last_linear is None:
+        print("WARNING: không tìm thấy regression head (Linear out=1) — skip warm-start")
+        return
+
+    name, m = last_linear
+    with torch.no_grad():
+        if m.bias is not None:
+            old_bias = m.bias.item()
+            m.bias.fill_(float(y_mean))
+            print(f"Warm-start {name}.bias: {old_bias:.6f} -> {y_mean:.6f}")
+
 
 def prepare_data(data, smiles_column='smiles', target_column='target',
                  device=torch.device('cpu')):
@@ -141,6 +165,12 @@ class Step2Trainer:
         print("Loading UniMol model (same pretrained weights as Step 1)...")
         _quiet_unimol_logger()
         model = load_unimol_model(self.task_type, self.device)
+
+        # 1.5. Warm-start regression head bias = mean(y_train)
+        # (chỉ cho regression; không thay đổi landscape, chỉ đổi θ₀)
+        if self.task_type == 'regression':
+            y_train_mean = float(train_df[target_column].values.mean())
+            warm_start_regression_head(model, y_mean=y_train_mean)
 
         # 2. Prepare data
         print("\nPreparing data (n_confomer=1, remove_hs=True)...")

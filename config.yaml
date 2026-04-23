@@ -1,25 +1,76 @@
-# UniMol-GP -- Tunable hyperparameters (finetune here)
-# Priority: CLI > config.yaml > script defaults
+# ========================================================================
+# UniMol-GP Configuration
+# ========================================================================
+# Priority: CLI args > config.yaml > script DEFAULTS
+#
+# Top-level keys:
+#   Shared across all steps (split_seed, gpu_id, random_seed, n_confomer for step 1)
+#
+# Step-specific blocks:
+#   step1:   (currently inherits shared keys; no step1: block needed)
+#   eggroll: block for step 2
+#   step3:   block for step 3
+# ========================================================================
 
-# Shared (all steps)
-split_seed: 4
-n_confomer: 1
-gpu_id: 0
 
-# Step 1 -- Gradient Descent
-epochs: 100
-batch_size: 32
+# ── Shared (all steps read from here) ───────────────────────────────────
+
+split_seed:    4
+random_seed:   42
+gpu_id:        0
+
+# ── Step 1 baseline (Gradient Descent) ──────────────────────────────────
+# Step 1 reads these at top-level (no block):
+
+n_confomer:    1               # step 1 uses single conformer
+epochs:        100
+batch_size:    32
 learning_rate: 0.0001
-patience: 10
+patience:      10
 
-# Step 2 -- EGGROLL
+
+# ── Step 2 (EGGROLL Evolution Strategies) ───────────────────────────────
+
 eggroll:
-  population_size: 32
-  rank: 16
-  sigma: 0.01
-  learning_rate: 0.1
-  num_generations: 800
-  patience: 200
+  population_size: 64
+  rank:            1
+  sigma:           0.01
+  learning_rate:   0.01
+  num_generations: 200
+  patience:        20
   eval_chunk_size: 64
-  lr_decay: 0.99
-  sigma_decay: 0.99
+  lr_decay:        1.0
+  sigma_decay:     1.0
+
+
+# ── Step 3 (Multi-tree GP + Double Ridge Readout) ───────────────────────
+
+step3:
+  # Data / conformers
+  n_confomer:           20           # K (must match cache)
+  conf_seed:            42          # RDKit seed for determinism
+  embeddings_cache_dir: "data/embeddings_cache"
+  precompute_batch_size: 64         # UniMol forward batch
+
+  # GP architecture
+  num_trees_per_conformer: 16           # trees per conformer (Forest output_len)
+  gp_input_dim:         128           # PCA-reduced dim (512 → gp_input_dim).
+                                     # ⚠ MUST be ≲64 due to evogp CUDA stack limit.
+  pop_size:             500          # super-individuals per Forest
+  max_tree_len:         640          # = q × (2^(max_layer_cnt+1) - 1)
+  max_layer_cnt:        3            # max depth per subtree (init trees)
+  mutation_max_layer_cnt: 4          # shallower for subtree mutation
+  using_funcs:          ["+", "-", "*", "/", "max", "min", "sin", "cos", "exp", "log"]  # function set (must be same as in gp.py)
+  const_samples:        [-1.0, -0.5, 0.0, 0.5, 1.0]
+  mutation_rate:        0.2
+  survival_rate:        0.3
+  elite_rate:           0.01
+  parsimony_alpha:      0.0          # tree-size penalty (0 = disabled)
+
+  # Ridge readout
+  lambda_inner:         1.0          # per-conformer inner ridge L2
+  lambda_outer:         0.1          # outer ridge L2 (across K conformers)
+
+  # Training loop
+  num_generations:      200
+  patience:             50           # generations without valid improvement
