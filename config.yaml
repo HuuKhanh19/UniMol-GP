@@ -9,18 +9,18 @@
 # Step-specific blocks:
 #   step1:   (currently inherits shared keys; no step1: block needed)
 #   eggroll: block for step 2
-#   step3:   block for step 3
+#   step3:   block for step 3 (now 2-phase: Phase 1 UniMol training + Phase 2 GP)
 # ========================================================================
 
 
 # ── Shared (all steps read from here) ───────────────────────────────────
 
-split_seed:    4
+split_seed:    0
 random_seed:   42
 gpu_id:        0
 
-# ── Step 1 baseline (Gradient Descent) ──────────────────────────────────
-# Step 1 reads these at top-level (no block):
+
+# ── Step 1 baseline (Gradient Descent, single conformer) ────────────────
 
 n_confomer:    1               # step 1 uses single conformer
 epochs:        100
@@ -43,34 +43,51 @@ eggroll:
   sigma_decay:     1.0
 
 
-# ── Step 3 (Multi-tree GP + Double Ridge Readout) ───────────────────────
+# ── Step 3 (Phase 1 UniMol Multi-Conf + Phase 2 GP) ─────────────────────
 
 step3:
   # Data / conformers
-  n_confomer:           20           # K (must match cache)
-  conf_seed:            42          # RDKit seed for determinism
+  n_confomer:           10           # K (target conformers per molecule)
+  conf_seed:            42           # RDKit seed for determinism
   embeddings_cache_dir: "data/embeddings_cache"
-  precompute_batch_size: 64         # UniMol forward batch
 
-  # GP architecture
-  num_trees_per_conformer: 16           # trees per conformer (Forest output_len)
-  gp_input_dim:         128           # PCA-reduced dim (512 → gp_input_dim).
-                                     # ⚠ MUST be ≲64 due to evogp CUDA stack limit.
-  pop_size:             500          # super-individuals per Forest
-  max_tree_len:         640          # = q × (2^(max_layer_cnt+1) - 1)
-  max_layer_cnt:        3            # max depth per subtree (init trees)
-  mutation_max_layer_cnt: 4          # shallower for subtree mutation
-  using_funcs:          ["+", "-", "*", "/", "max", "min", "sin", "cos", "exp", "log"]  # function set (must be same as in gp.py)
+  # ── Phase 1: UniMol multi-conformer training ──────────────────────
+  # Trains UniMol with K confs per molecule + random duplication when
+  # generated confs < K. Pool AFTER classification head (TTA-style).
+  # Loss/metric per task type:
+  #   regression:               MSE / RMSE
+  #   classification (binary):  CrossEntropy / AUC
+  #   multilabel_classification: BCEWithLogits / mean AUC
+  phase1:
+    epochs:           50              # max epochs
+    batch_size:       4              # molecules per batch (effective: B × K conformers)
+    learning_rate:    1.0e-4
+    patience:         10              # early stopping
+    warmup_ratio:     0.03            # linear warmup fraction of total steps
+    max_norm:         5.0             # gradient clipping
+    use_amp:          true            # mixed precision training
+    weight_decay:     0.0
+    target_normalize: "auto"          # 'auto' | 'none' (regression only)
+
+  # ── Phase 2: GP architecture ──────────────────────────────────────
+  num_trees_per_conformer: 16          # trees per conformer (Forest output_len)
+  gp_input_dim:         128            # PCA-reduced dim (512 → gp_input_dim)
+                                       # ⚠ larger may hit evogp CUDA stack limit
+  pop_size:             500            # super-individuals per Forest
+  max_tree_len:         640            # ≥ q × (2^(max_layer_cnt+1) - 1) × safety
+  max_layer_cnt:        3              # max depth per subtree (init trees)
+  mutation_max_layer_cnt: 4            # depth for mutation subtree replacement
+  using_funcs:          ["+", "-", "*", "/", "max", "min", "sin", "cos", "exp", "log"]
   const_samples:        [-1.0, -0.5, 0.0, 0.5, 1.0]
   mutation_rate:        0.2
   survival_rate:        0.3
   elite_rate:           0.01
-  parsimony_alpha:      0.0          # tree-size penalty (0 = disabled)
+  parsimony_alpha:      0.0            # tree-size penalty (0 = disabled)
 
   # Ridge readout
-  lambda_inner:         1.0          # per-conformer inner ridge L2
-  lambda_outer:         0.1          # outer ridge L2 (across K conformers)
+  lambda_inner:         1.0            # per-conformer inner ridge L2
+  lambda_outer:         0.1            # outer ridge L2 (across K conformers)
 
-  # Training loop
+  # ── Phase 2 training loop ─────────────────────────────────────────
   num_generations:      200
-  patience:             50           # generations without valid improvement
+  patience:             50             # generations without valid improvement
