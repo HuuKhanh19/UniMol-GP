@@ -47,6 +47,47 @@ logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Hard determinism — apply EARLY before model build
+# ──────────────────────────────────────────────────────────────────────
+
+def set_phase1_seed_strict(seed: int) -> None:
+    """
+    Set ALL randomness sources for bit-exact reproducibility (Option B: Hard determinism).
+
+    Apply this BEFORE building the model so that classification_head random init
+    uses the same seed across runs.
+
+    Affects:
+        - Python random
+        - NumPy random
+        - PyTorch CPU + CUDA RNG (all GPUs)
+        - cuDNN: deterministic algorithms, no benchmarking
+        - PyTorch deterministic algorithms (raises warning if non-det op encountered)
+
+    Note: env vars CUBLAS_WORKSPACE_CONFIG and PYTHONHASHSEED must be set
+    BEFORE importing torch — done at top of scripts/run_step3.py.
+
+    Speed cost: ~10-30% slower training due to deterministic CUDA kernels.
+    """
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # cuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # PyTorch global deterministic mode
+    # warn_only=True: raise warning instead of error if a non-deterministic op
+    # is unavoidable (e.g. some CUDA scatter ops). Training continues.
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+    logger.info(f"[Determinism] Hard determinism enabled (seed={seed})")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Loss & Metric per task type
 # ──────────────────────────────────────────────────────────────────────
 
@@ -223,7 +264,12 @@ class Phase1Trainer:
         self.device = device
         self.handler = TaskHandler(task_type, num_tasks)
 
-        # Build model
+        # CRITICAL: set seed BEFORE building model.
+        # Otherwise classification_head random init uses uncontrolled RNG state
+        # → different weights every run → different training trajectory.
+        set_phase1_seed_strict(cfg.training_seed)
+
+        # Build model (now with controlled RNG)
         logger.info(f"Building MultiConformerUniMol(task={task_type}, num_tasks={num_tasks})")
         self.model = MultiConformerUniMol(
             task_type=task_type,
@@ -249,13 +295,16 @@ class Phase1Trainer:
         Build 3 DataLoaders. Train uses random-dup collate, valid/test deterministic.
 
         Returns: (train_loader, valid_loader, test_loader, shared_generator)
+
+        Note: global seeds (torch.manual_seed, np.random.seed, etc.) already set
+        in __init__ via set_phase1_seed_strict(). Here we only set the dedicated
+        shared_gen used by DataLoader/collate so its state is reproducible regardless
+        of how many CUDA ops happened during model construction.
         """
         cfg = self.cfg
 
-        # Single shared generator (per user choice)
-        # Used for both DataLoader.shuffle and collate's random sampling
-        torch.manual_seed(cfg.training_seed)
-        np.random.seed(cfg.training_seed)
+        # Dedicated generator for DataLoader shuffle + collate random sampling
+        # Seeded fresh here so its state is independent of model-build CUDA ops.
         shared_gen = torch.Generator()
         shared_gen.manual_seed(cfg.training_seed)
 

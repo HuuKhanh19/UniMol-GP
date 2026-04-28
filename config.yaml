@@ -15,7 +15,7 @@
 
 # ── Shared (all steps read from here) ───────────────────────────────────
 
-split_seed:    0
+split_seed:    4
 random_seed:   42
 gpu_id:        0
 

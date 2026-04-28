@@ -20,10 +20,17 @@ Usage:
     python scripts/run_step3.py --dataset esol --K 5 --num-trees-per-conformer 15 --pop-size 800
 """
 
+# ──────────────────────────────────────────────────────────────────────
+# IMPORTANT: Set env vars BEFORE importing torch for hard determinism.
+# These must be set before any CUDA initialization happens.
+# ──────────────────────────────────────────────────────────────────────
+import os
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")  # deterministic CUBLAS
+os.environ.setdefault("PYTHONHASHSEED", "42")                # deterministic hashing
+
 import argparse
 import json
 import logging
-import os
 import sys
 from datetime import datetime
 

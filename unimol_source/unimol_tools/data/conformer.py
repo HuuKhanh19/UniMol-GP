@@ -373,6 +373,12 @@ def inner_smi2coords(
         all_energies_new.append(e)
     
     assert len(atoms) == len(all_confs_coords_new[0]), "coordinates shape is not align with {}".format(smi)
+    # ── NEW: sort by energy ASCENDING (stable; NaN/inf → end) ────────
+    # energies_arr = np.array(all_energies_new, dtype=float)
+    # sort_keys = np.where(np.isnan(energies_arr), np.inf, energies_arr)
+    # order = np.argsort(sort_keys, kind='stable')
+    # all_confs_coords_new = [all_confs_coords_new[i] for i in order]
+    # all_energies_new = [all_energies_new[i] for i in order]
     if return_energy:
         # (optional) đổi sang ΔE theo molecule để dùng weighting ổn hơn
         arr = np.array(all_energies_new, dtype=float)
