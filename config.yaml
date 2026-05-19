@@ -15,7 +15,7 @@
 
 # ── Shared (all steps read from here) ───────────────────────────────────
 
-split_seed:    4
+split_seed:    0
 random_seed:   42
 gpu_id:        0
 
@@ -91,3 +91,15 @@ step3:
   # ── Phase 2 training loop ─────────────────────────────────────────
   num_generations:      200
   patience:             50             # generations without valid improvement
+
+  phase3:
+    enabled:           true              # set false to skip Phase 3
+    epochs:            50                # short fine-tune
+    batch_size:        4                 # same as Phase 1
+    learning_rate:     1.0e-5            # 10x lower than Phase 1
+    patience:          5                 # short patience
+    max_norm:          5.0               # gradient clipping
+    use_amp:           false              # stability over speed
+    lambda_anchor:     0.5               # weight of MSE(emb_phase3, emb_phase1)
+    pipeline_mode:     "safe"            # 'safe' | 'vanilla'
+    random_dup_train:  true              # like Phase 1 augmentation

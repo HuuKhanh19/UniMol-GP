@@ -1,23 +1,25 @@
 #!/usr/bin/env python
 """
-Step 3: 2-phase pipeline
+Step 3: 3-phase pipeline
   Phase 1: Train UniMol with K conformers (multi-conf, random duplication)
   Phase 2: Multi-tree GP + double ridge readout on Phase 1 embeddings
+  Phase 3: SGD fine-tune encoder with frozen GP+ridge readout (regression only)
 
 Priority: CLI > config.yaml step3:* > DEFAULTS.
 
 Flow:
-    1. Check embeddings cache:
-       - if exists and not --force-phase1: skip Phase 1, load cache
-       - else: run Phase 1 (train UniMol + extract embeddings → cache)
-    2. Run Phase 2 GP training with cache
-    3. Save phase1_results.json (Phase 1) + results.json (Phase 2)
-       + best_individual.pt + formulas.txt
+    1. Resolve params (CLI / config / defaults)
+    2. Build datasets (only if needed: cache miss OR Phase 3 enabled)
+    3. Phase 1: run if cache miss or --force-phase1; else load cache
+    4. Phase 2: GP training, save best_individual.pt
+    5. Phase 3: encoder fine-tune (if enabled & regression)
+    6. Final summary
 
 Usage:
     python scripts/run_step3.py --dataset esol
     python scripts/run_step3.py --dataset esol --force-phase1
-    python scripts/run_step3.py --dataset esol --K 5 --num-trees-per-conformer 15 --pop-size 800
+    python scripts/run_step3.py --dataset esol --phase3-enabled false
+    python scripts/run_step3.py --dataset esol --phase3-epochs 20 --phase3-lambda-anchor 1.0
 """
 
 # ──────────────────────────────────────────────────────────────────────
@@ -58,7 +60,9 @@ from src.trainers.step3_gp import Step3Trainer  # noqa: E402
 from src.trainers.step3_phase1_train import Phase1Config, Phase1Trainer  # noqa: E402
 
 
-# ── ALL defaults ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# ALL defaults
+# ──────────────────────────────────────────────────────────────────────
 
 DEFAULTS = {
     # Shared
@@ -106,12 +110,26 @@ DEFAULTS = {
     "num_generations":        100,
     "patience":               15,
 
+    # Phase 3 (encoder fine-tune)
+    "phase3_enabled":         True,
+    "phase3_epochs":          15,
+    "phase3_batch_size":      4,
+    "phase3_learning_rate":   1.0e-5,
+    "phase3_patience":        5,
+    "phase3_max_norm":        5.0,
+    "phase3_use_amp":         False,
+    "phase3_lambda_anchor":   0.5,
+    "phase3_pipeline_mode":   "safe",   # "safe" | "vanilla"
+    "phase3_random_dup_train": True,
+
     # Save control
     "no_save":                False,
 }
 
 
-# ── Config / params resolution ───────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# Config / params resolution
+# ──────────────────────────────────────────────────────────────────────
 
 def load_config(path="config.yaml"):
     if os.path.exists(path):
@@ -128,10 +146,20 @@ def _pick(cli_val, cfg_val, default):
     return default
 
 
+def _str_to_bool(s):
+    """Parse string '--flag true/false' values from CLI."""
+    if s is None:
+        return None
+    if isinstance(s, bool):
+        return s
+    return str(s).lower() in ("true", "1", "yes", "y")
+
+
 def resolve_params(args, cfg):
     """CLI > config.step3.* / config.* > DEFAULTS."""
     s3 = cfg.get("step3", {}) or {}
     ph1 = s3.get("phase1", {}) or {}
+    ph3 = s3.get("phase3", {}) or {}
     p = {}
 
     # Shared
@@ -146,17 +174,17 @@ def resolve_params(args, cfg):
     p["conf_seed"] = _pick(None, s3.get("conf_seed"), DEFAULTS["conf_seed"])
 
     # Phase 1
-    p["phase1_epochs"]          = _pick(args.phase1_epochs, ph1.get("epochs"), DEFAULTS["phase1_epochs"])
-    p["phase1_batch_size"]      = _pick(args.phase1_batch_size, ph1.get("batch_size"), DEFAULTS["phase1_batch_size"])
-    p["phase1_learning_rate"]   = _pick(args.phase1_learning_rate, ph1.get("learning_rate"), DEFAULTS["phase1_learning_rate"])
-    p["phase1_patience"]        = _pick(args.phase1_patience, ph1.get("patience"), DEFAULTS["phase1_patience"])
-    p["phase1_warmup_ratio"]    = _pick(None, ph1.get("warmup_ratio"), DEFAULTS["phase1_warmup_ratio"])
-    p["phase1_max_norm"]        = _pick(None, ph1.get("max_norm"), DEFAULTS["phase1_max_norm"])
-    p["phase1_use_amp"]         = _pick(None, ph1.get("use_amp"), DEFAULTS["phase1_use_amp"])
-    p["phase1_weight_decay"]    = _pick(None, ph1.get("weight_decay"), DEFAULTS["phase1_weight_decay"])
+    p["phase1_epochs"]           = _pick(args.phase1_epochs, ph1.get("epochs"), DEFAULTS["phase1_epochs"])
+    p["phase1_batch_size"]       = _pick(args.phase1_batch_size, ph1.get("batch_size"), DEFAULTS["phase1_batch_size"])
+    p["phase1_learning_rate"]    = _pick(args.phase1_learning_rate, ph1.get("learning_rate"), DEFAULTS["phase1_learning_rate"])
+    p["phase1_patience"]         = _pick(args.phase1_patience, ph1.get("patience"), DEFAULTS["phase1_patience"])
+    p["phase1_warmup_ratio"]     = _pick(None, ph1.get("warmup_ratio"), DEFAULTS["phase1_warmup_ratio"])
+    p["phase1_max_norm"]         = _pick(None, ph1.get("max_norm"), DEFAULTS["phase1_max_norm"])
+    p["phase1_use_amp"]          = _pick(None, ph1.get("use_amp"), DEFAULTS["phase1_use_amp"])
+    p["phase1_weight_decay"]     = _pick(None, ph1.get("weight_decay"), DEFAULTS["phase1_weight_decay"])
     p["phase1_target_normalize"] = _pick(None, ph1.get("target_normalize"), DEFAULTS["phase1_target_normalize"])
 
-    # GP
+    # GP architecture (Phase 2)
     p["K"]                       = _pick(args.K, s3.get("n_confomer"), DEFAULTS["K"])
     ntp_cfg                      = s3.get("num_trees_per_conformer", s3.get("q"))
     p["num_trees_per_conformer"] = _pick(args.num_trees_per_conformer, ntp_cfg, DEFAULTS["num_trees_per_conformer"])
@@ -176,17 +204,32 @@ def resolve_params(args, cfg):
     p["lambda_inner"] = _pick(args.lambda_inner, s3.get("lambda_inner"), DEFAULTS["lambda_inner"])
     p["lambda_outer"] = _pick(args.lambda_outer, s3.get("lambda_outer"), DEFAULTS["lambda_outer"])
 
-    # GP loop
+    # Phase 2 GP loop
     p["num_generations"] = _pick(args.num_generations, s3.get("num_generations"), DEFAULTS["num_generations"])
     p["patience"]        = _pick(args.patience, s3.get("patience"), DEFAULTS["patience"])
 
-    p["no_save"]         = args.no_save
-    p["force_phase1"]    = args.force_phase1
+    # Phase 3
+    cli_phase3_enabled = _str_to_bool(args.phase3_enabled)
+    p["phase3_enabled"]          = _pick(cli_phase3_enabled, ph3.get("enabled"), DEFAULTS["phase3_enabled"])
+    p["phase3_epochs"]           = _pick(args.phase3_epochs, ph3.get("epochs"), DEFAULTS["phase3_epochs"])
+    p["phase3_batch_size"]       = _pick(args.phase3_batch_size, ph3.get("batch_size"), DEFAULTS["phase3_batch_size"])
+    p["phase3_learning_rate"]    = _pick(args.phase3_learning_rate, ph3.get("learning_rate"), DEFAULTS["phase3_learning_rate"])
+    p["phase3_patience"]         = _pick(args.phase3_patience, ph3.get("patience"), DEFAULTS["phase3_patience"])
+    p["phase3_max_norm"]         = _pick(None, ph3.get("max_norm"), DEFAULTS["phase3_max_norm"])
+    p["phase3_use_amp"]          = _pick(None, ph3.get("use_amp"), DEFAULTS["phase3_use_amp"])
+    p["phase3_lambda_anchor"]    = _pick(args.phase3_lambda_anchor, ph3.get("lambda_anchor"), DEFAULTS["phase3_lambda_anchor"])
+    p["phase3_pipeline_mode"]    = _pick(args.phase3_pipeline_mode, ph3.get("pipeline_mode"), DEFAULTS["phase3_pipeline_mode"])
+    p["phase3_random_dup_train"] = _pick(None, ph3.get("random_dup_train"), DEFAULTS["phase3_random_dup_train"])
+
+    p["no_save"]      = args.no_save
+    p["force_phase1"] = args.force_phase1
 
     return p
 
 
-# ── Logging ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────────────────────────
 
 def setup_logging(level=logging.INFO):
     root = logging.getLogger()
@@ -200,7 +243,9 @@ def setup_logging(level=logging.INFO):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-# ── Data loading ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# Data loading
+# ──────────────────────────────────────────────────────────────────────
 
 def load_split(dataset_name, split_seed):
     seed_dir = os.path.join(PROCESSED_DIR, dataset_name, f"seed_{split_seed}")
@@ -249,12 +294,19 @@ def generate_conformers_for_split(
     return conformers_per_mol
 
 
-# ── Phase 1 orchestration ────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# Dataset building (shared by Phase 1 and Phase 3)
+# ──────────────────────────────────────────────────────────────────────
 
-def run_phase1(params, dataset_info, output_dir):
-    """
-    Run Phase 1: train UniMol with K confs, extract embeddings cache.
-    Returns: (cache_path, phase1_results_dict)
+def _build_datasets(params, dataset_info):
+    """Load CSVs + generate conformers + build datasets.
+
+    Returns:
+        train_ds (MolKConfDataset),
+        valid_ds (IndexedMolKConfDataset),
+        test_ds  (IndexedMolKConfDataset),
+        task_type (str), num_tasks (int),
+        device (torch.device).
     """
     dataset = dataset_info["name"]
     split_seed = params["split_seed"]
@@ -293,7 +345,6 @@ def run_phase1(params, dataset_info, output_dir):
         remove_hs=params["remove_hs"], desc="test"
     )
 
-    # Build datasets (filter molecules with 0 conformers)
     train_targets_arr = np.asarray(train_df[target_col].values, dtype=np.float32)
     valid_targets_arr = np.asarray(valid_df[target_col].values, dtype=np.float32)
     test_targets_arr  = np.asarray(test_df[target_col].values, dtype=np.float32)
@@ -308,6 +359,24 @@ def run_phase1(params, dataset_info, output_dir):
           f"min={train_ds.valid_counts.min()}, "
           f"mean={train_ds.valid_counts.mean():.2f}, "
           f"max={train_ds.valid_counts.max()}")
+
+    return train_ds, valid_ds, test_ds, task_type, num_tasks, device
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 1 orchestration
+# ──────────────────────────────────────────────────────────────────────
+
+def run_phase1(params, dataset_info, output_dir,
+               train_ds, valid_ds, test_ds,
+               task_type, num_tasks, device):
+    """Run Phase 1: train UniMol with K confs, extract embeddings cache.
+
+    Returns: (cache_path, phase1_results_dict)
+    """
+    dataset = dataset_info["name"]
+    split_seed = params["split_seed"]
+    K = params["K"]
 
     # Build Phase 1 config
     ph1_cfg = Phase1Config(
@@ -369,11 +438,78 @@ def run_phase1(params, dataset_info, output_dir):
     return cache_path, phase1_results
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
+# Phase 3 orchestration
+# ──────────────────────────────────────────────────────────────────────
+
+def run_phase3(params, dataset_info, output_dir, cache_path,
+               train_ds, valid_ds, test_ds,
+               task_type, num_tasks, device,
+               phase2_results, phase1_model_path):
+    """Run Phase 3: encoder fine-tune with frozen GP+ridge readout.
+
+    Returns: phase3_results dict (or None on error/skipped).
+    """
+    from src.trainers.step3_phase3_train import Phase3Config, Phase3Trainer
+
+    if task_type != "regression":
+        print(f"\n[Phase 3 skipped: task_type={task_type} (regression-only)]")
+        return None
+
+    print("\n" + "=" * 70)
+    print("Phase 3: Encoder fine-tuning")
+    print("=" * 70)
+
+    # Locate Phase 2 best individual
+    best_individual_path = os.path.join(output_dir, "best_individual.pt")
+    if not os.path.exists(best_individual_path):
+        print(f"\n✗ Phase 3 skipped: best_individual.pt not found at {best_individual_path}")
+        return None
+
+    if not os.path.exists(phase1_model_path):
+        print(f"\n✗ Phase 3 skipped: Phase 1 model not found at {phase1_model_path}")
+        return None
+
+    ph3_cfg = Phase3Config(
+        K=params["K"],
+        epochs=params["phase3_epochs"],
+        batch_size=params["phase3_batch_size"],
+        learning_rate=params["phase3_learning_rate"],
+        patience=params["phase3_patience"],
+        max_norm=params["phase3_max_norm"],
+        use_amp=params["phase3_use_amp"],
+        lambda_anchor=params["phase3_lambda_anchor"],
+        pipeline_mode=params["phase3_pipeline_mode"],
+        random_dup_train=params["phase3_random_dup_train"],
+        training_seed=params["random_seed"],
+        fixed_seed_eval=0,
+    )
+
+    phase3_output_dir = os.path.join(output_dir, "phase3")
+    os.makedirs(phase3_output_dir, exist_ok=True)
+
+    trainer = Phase3Trainer(
+        cfg=ph3_cfg,
+        task_type=task_type,
+        num_tasks=num_tasks,
+        device=device,
+        phase1_model_path=phase1_model_path,
+        best_individual_path=best_individual_path,
+        cache_path=cache_path,
+        gp_input_dim=params["D"],
+        baseline_phase2_valid_mse=phase2_results["valid_mse"],
+        baseline_phase2_test_mse=phase2_results["test_mse"],
+    )
+    return trainer.run(train_ds, valid_ds, test_ds, output_dir=phase3_output_dir)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 3: Phase 1 (UniMol multi-conf training) + Phase 2 (GP)",
+        description="Step 3: Phase 1 (UniMol multi-conf) + Phase 2 (GP) + Phase 3 (encoder fine-tune)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--dataset",      type=str, required=True, choices=DATASET_NAMES)
@@ -408,6 +544,17 @@ def main():
     parser.add_argument("--phase1-learning-rate", type=float, default=None)
     parser.add_argument("--phase1-patience", type=int, default=None)
 
+    # Phase 3
+    parser.add_argument("--phase3-enabled", type=str, default=None,
+                        help="true/false (default from config or true)")
+    parser.add_argument("--phase3-epochs", type=int, default=None)
+    parser.add_argument("--phase3-batch-size", type=int, default=None)
+    parser.add_argument("--phase3-learning-rate", type=float, default=None)
+    parser.add_argument("--phase3-patience", type=int, default=None)
+    parser.add_argument("--phase3-lambda-anchor", type=float, default=None)
+    parser.add_argument("--phase3-pipeline-mode", type=str, default=None,
+                        choices=["safe", "vanilla"])
+
     # Cache / save
     parser.add_argument("--cache-dir",    type=str, default=None)
     parser.add_argument("--force-phase1", action="store_true")
@@ -427,7 +574,7 @@ def main():
 
     # ── Header ───────────────────────────────────────────────────
     print("=" * 70)
-    print("UniMol-GP -- Step 3: Phase 1 (UniMol Multi-Conf) + Phase 2 (GP)")
+    print("UniMol-GP -- Step 3: Phase 1 (UniMol Multi-Conf) + Phase 2 (GP) + Phase 3 (fine-tune)")
     print("=" * 70)
     print(f"Time         : {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"Dataset      : {args.dataset} ({dataset_info['task_type']})")
@@ -453,6 +600,15 @@ def main():
     print(f"--- GP loop ---")
     print(f"num_gens                : {params['num_generations']}")
     print(f"patience                : {params['patience']}")
+    print(f"--- Phase 3 (encoder fine-tune) ---")
+    print(f"enabled                 : {params['phase3_enabled']}")
+    if params["phase3_enabled"]:
+        print(f"epochs                  : {params['phase3_epochs']}")
+        print(f"batch_size              : {params['phase3_batch_size']}")
+        print(f"learning_rate           : {params['phase3_learning_rate']}")
+        print(f"patience                : {params['phase3_patience']}")
+        print(f"λ_anchor                : {params['phase3_lambda_anchor']}")
+        print(f"pipeline_mode           : {params['phase3_pipeline_mode']}")
     if not params["no_save"]:
         print(f"Save to                 : {OUTPUT_DIR}/step3/{args.dataset}/seed_{split_seed}/{timestamp}/")
     print("=" * 70)
@@ -461,10 +617,10 @@ def main():
     if dataset_info["task_type"] != "regression":
         print(f"\n✗ Error: Phase 2 GP scope is regression only, got "
               f"task_type={dataset_info['task_type']} for dataset {args.dataset}")
-        print("   (Phase 1 supports all task types, but PR 3 hasn't extended Phase 2 yet.)")
+        print("   (Phase 1 supports all task types, but Phase 2 hasn't been extended yet.)")
         sys.exit(1)
 
-    # ── Cache check + Phase 1 ────────────────────────────────────
+    # ── Cache check ──────────────────────────────────────────────
     K = params["K"]
     cache_dir = params["cache_dir"]
     have_cache = cache_exists(cache_dir, args.dataset, split_seed, K)
@@ -473,6 +629,34 @@ def main():
                                f"seed_{split_seed}", timestamp)
     os.makedirs(output_dir, exist_ok=True)
 
+    # ── Decide whether to build datasets ─────────────────────────
+    # Datasets are needed for:
+    #   - Phase 1 run (cache miss or --force-phase1)
+    #   - Phase 3 run (regardless of cache, if enabled & regression)
+    need_datasets = (
+        (not have_cache) or params["force_phase1"]
+        or (params["phase3_enabled"] and dataset_info["task_type"] == "regression")
+    )
+
+    train_ds = valid_ds = test_ds = None
+    task_type = dataset_info["task_type"]
+    num_tasks = 1
+    use_gpu = params["use_gpu"] and torch.cuda.is_available()
+    device = torch.device(f"cuda:{params['gpu_id']}") if use_gpu else torch.device("cpu")
+
+    if need_datasets:
+        print("\n[Building datasets — needed for Phase 1 run and/or Phase 3]")
+        try:
+            train_ds, valid_ds, test_ds, task_type, num_tasks, device = _build_datasets(
+                params, dataset_info,
+            )
+        except Exception as e:
+            print(f"\n✗ Dataset build error: {type(e).__name__}: {e}")
+            raise
+    else:
+        print(f"\n[Datasets not built — using cache only, Phase 3 disabled or non-regression]")
+
+    # ── Phase 1: cache check + run ───────────────────────────────
     if have_cache and not params["force_phase1"]:
         cache_path = get_cache_path(cache_dir, args.dataset, split_seed, K)
         print(f"\n✓ Using existing cache → {cache_path}")
@@ -484,7 +668,11 @@ def main():
         else:
             print(f"\n[Cache not found → running Phase 1]")
         try:
-            cache_path, phase1_results = run_phase1(params, dataset_info, output_dir)
+            cache_path, phase1_results = run_phase1(
+                params, dataset_info, output_dir,
+                train_ds=train_ds, valid_ds=valid_ds, test_ds=test_ds,
+                task_type=task_type, num_tasks=num_tasks, device=device,
+            )
         except Exception as e:
             print(f"\n✗ Phase 1 error: {type(e).__name__}: {e}")
             raise
@@ -510,6 +698,39 @@ def main():
         print(f"\n✗ Phase 2 error: {type(e).__name__}: {e}")
         raise
 
+    # ── Phase 3: encoder fine-tune (optional) ────────────────────
+    phase3_results = None
+    if params["phase3_enabled"]:
+        # Locate Phase 1 model path
+        if phase1_results is not None:
+            phase1_model_path = phase1_results["model_path"]
+        else:
+            # Phase 1 was cached/skipped — find from cache metadata or default location
+            try:
+                from src.data.embeddings_cache import load_cache
+                _cache = load_cache(cache_path, map_location='cpu')
+                phase1_model_path = _cache["metadata"].get("phase1_model_path")
+            except Exception:
+                phase1_model_path = None
+            if not phase1_model_path or not os.path.exists(phase1_model_path):
+                # Fall back: search for it in current output_dir or previous timestamps
+                phase1_model_path = os.path.join(output_dir, "phase1", "phase1_model.pth")
+
+        try:
+            phase3_results = run_phase3(
+                params, dataset_info, output_dir, cache_path,
+                train_ds=train_ds, valid_ds=valid_ds, test_ds=test_ds,
+                task_type=task_type, num_tasks=num_tasks, device=device,
+                phase2_results=results, phase1_model_path=phase1_model_path,
+            )
+        except KeyboardInterrupt:
+            print("\n[Phase 3 interrupted by user]")
+            phase3_results = {"chosen_model": "phase2", "interrupted": True}
+        except Exception as e:
+            print(f"\n✗ Phase 3 error: {type(e).__name__}: {e}")
+            import traceback; traceback.print_exc()
+            phase3_results = {"chosen_model": "phase2", "error": str(e)}
+
     # ── Final summary ────────────────────────────────────────────
     print("\n" + "=" * 70)
     print("FINAL RESULTS")
@@ -525,11 +746,46 @@ def main():
     print(f"Best gen       : {results['best_gen']}")
     print(f"Train RMSE     : {results['train_rmse']:.4f}  (MSE={results['train_mse']:.4f})")
     print(f"Valid RMSE     : {results['valid_rmse']:.4f}  (MSE={results['valid_mse']:.4f})")
-    print(f"Test  RMSE     : {results['test_rmse']:.4f}  (MSE={results['test_mse']:.4f})  ← MAIN")
+    print(f"Test  RMSE     : {results['test_rmse']:.4f}  (MSE={results['test_mse']:.4f})")
     print(f"Total time     : {results['total_time_s']:.1f}s "
           f"({results['num_generations_run']} generations)")
+
+    if phase3_results is not None and "phase3_metrics" in phase3_results:
+        m3 = phase3_results["phase3_metrics"]
+        print(f"--- Phase 3 (encoder fine-tune) ---")
+        for split in ("train", "valid", "test"):
+            print(f"{split.capitalize():5s} | "
+                  f"MSE={m3[split]['mse']:.4f}, RMSE={m3[split]['rmse']:.4f}")
+        chosen = phase3_results["chosen_model"]
+        save_strategy = phase3_results.get("save_strategy", "always_phase3")
+        print(f"Save strategy  : {save_strategy}")
+        print(f"Chosen model   : {chosen.upper()}")
+        # Diagnostic deltas (Phase 3 - Phase 2)
+        d_valid = m3['valid']['mse'] - results['valid_mse']
+        d_test  = m3['test']['mse']  - results['test_mse']
+        v_arrow = "↓ better" if d_valid < 0 else "↑ worse"
+        t_arrow = "↓ better" if d_test  < 0 else "↑ worse"
+        print(f"Δvalid MSE     : {d_valid:+.4f}  ({v_arrow})")
+        print(f"Δtest  MSE     : {d_test:+.4f}  ({t_arrow})")
+
+    # Final answer — Phase 3 is always canonical when it ran successfully
+    print(f"\n--- CANONICAL RESULT ---")
+    if phase3_results is not None and "phase3_metrics" in phase3_results:
+        m3 = phase3_results["phase3_metrics"]
+        print(f"Test  RMSE     : {m3['test']['rmse']:.4f}  ← MAIN (Phase 3)")
+    else:
+        # Phase 3 disabled, errored, or interrupted — fall back to Phase 2
+        reason = "disabled"
+        if phase3_results is not None:
+            if "error" in phase3_results:
+                reason = f"errored: {phase3_results['error'][:60]}"
+            elif "interrupted" in phase3_results:
+                reason = "interrupted"
+        print(f"Test  RMSE     : {results['test_rmse']:.4f}  "
+              f"← MAIN (Phase 2 fallback — Phase 3 {reason})")
+
     if not params["no_save"]:
-        print(f"Saved to       : {OUTPUT_DIR}/{experiment_name}/")
+        print(f"\nSaved to       : {OUTPUT_DIR}/{experiment_name}/")
     print("=" * 70)
     print(f"End: {datetime.now():%Y-%m-%d %H:%M:%S}")
 
