@@ -1,0 +1,30 @@
+# Experiment A — Sanity check hyperparameters (reference)
+# Scripts read args from CLI, this file just documents canonical values.
+
+data:
+  csv: data/raw/refined_ESOL.csv
+  cache_dir: data/cache
+  val_split_frac: 0.1
+  remove_hs: false
+  seed: 42
+
+baseline_gd:
+  epochs: 500
+  batch_size: 64
+  lr: 1.0e-3
+  optimizer: adam
+  standardize_y: false
+
+eggroll:
+  epochs: 500
+  batch_size: 64
+  pop_size: 256          # must be even (antithetic)
+  sigma: 0.05            # noise scale
+  lr: 1.0e-2             # outer Adam lr applied to EGGROLL gradient
+  use_antithetic: true
+  fitness_shaping: zscore  # zscore | rank | raw
+  standardize_y: false
+
+success_criteria:
+  rmse_relative_gap_max: 0.05   # |EGGROLL - GD| / GD on val RMSE
+  r2_absolute_gap_max: 0.02
