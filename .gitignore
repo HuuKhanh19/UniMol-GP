@@ -31,6 +31,15 @@ dist/
 venv/
 env/
 
+# Bỏ qua tất cả nội dung bên trong experiments
+experiments/*
+
+# Nhưng KHÔNG bỏ qua 2 thư mục này
+!experiments/exp_A_sanity/
+!experiments/exp_B_encoder/
+
+logs/
+
 # IDE & OS
 .idea/
 .vscode/
