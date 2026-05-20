@@ -1,0 +1,12 @@
+{
+  "n_train": 1004,
+  "n_val": 111,
+  "embed_dim": 512,
+  "n_confomer": 1,
+  "remove_hs": false,
+  "data_type": "molecule",
+  "seed": 42,
+  "split_frac": 0.1,
+  "has_VALID_col": false,
+  "embedding_sha256": "d3eb183f2d1dcd29368a3f98c9d795173ad7db62e3a4fb0f317c9c7ac0b12cec"
+}

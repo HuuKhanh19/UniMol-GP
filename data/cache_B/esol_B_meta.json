@@ -1,0 +1,10 @@
+{
+  "n_train": 1004,
+  "n_val": 111,
+  "n_confomer": 1,
+  "remove_hs": false,
+  "max_atoms": 256,
+  "seed": 42,
+  "split_frac": 0.1,
+  "has_VALID_col": false
+}

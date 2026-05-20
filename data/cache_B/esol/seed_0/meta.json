@@ -1,0 +1,17 @@
+{
+  "dataset": "esol",
+  "split_seed": 0,
+  "n_train": 904,
+  "n_valid": 100,
+  "n_test": 111,
+  "n_confomer": 1,
+  "remove_hs": false,
+  "max_atoms": 256,
+  "smiles_col_used": "smiles",
+  "target_col_used": "target",
+  "source_step1_csvs": [
+    "data\\processed\\esol\\seed_0\\esol_train.csv",
+    "data\\processed\\esol\\seed_0\\esol_valid.csv",
+    "data\\processed\\esol\\seed_0\\esol_test.csv"
+  ]
+}
