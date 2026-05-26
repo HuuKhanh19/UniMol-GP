@@ -11,15 +11,3 @@ epochs: 100
 batch_size: 32
 learning_rate: 0.0001
 patience: 10
-
-# Step 2 -- EGGROLL
-eggroll:
-  population_size: 32
-  rank: 16
-  sigma: 0.01
-  learning_rate: 0.1
-  num_generations: 800
-  patience: 200
-  eval_chunk_size: 64
-  lr_decay: 0.99
-  sigma_decay: 0.99
