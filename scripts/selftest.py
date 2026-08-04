@@ -214,11 +214,18 @@ CHECKS = {
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('checks', nargs='*', choices=list(CHECKS),
-                    help='which checks to run (default: all)')
+    # No `choices=` here: with nargs='*' on a positional, argparse before 3.10
+    # validates the empty default against choices and rejects its own default.
+    ap.add_argument('checks', nargs='*', metavar='CHECK',
+                    help=f'which checks to run, from {{{", ".join(CHECKS)}}} '
+                         f'(default: all)')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     args = ap.parse_args()
 
+    unknown = [c for c in args.checks if c not in CHECKS]
+    if unknown:
+        ap.error(f'unknown check(s): {", ".join(unknown)}. '
+                 f'Choose from: {", ".join(CHECKS)}')
     names = args.checks or list(CHECKS)
     print(f'self-test on {args.device}\n')
     failed = []
