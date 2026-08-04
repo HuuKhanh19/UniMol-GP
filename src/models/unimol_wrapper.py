@@ -7,7 +7,6 @@ Accepts a flat params dict. Passes ALL hyperparameters to MolTrain.
 import os, logging
 import numpy as np
 import pandas as pd
-from typing import Dict
 from sklearn.metrics import mean_squared_error, roc_auc_score
 
 from src.data.datasets import OUTPUT_DIR

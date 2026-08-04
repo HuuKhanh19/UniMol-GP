@@ -10,7 +10,7 @@ Usage:
     python scripts/run_step1.py --dataset esol --gpu-id 1
 """
 
-import os, sys, argparse, json, yaml, logging
+import os, sys, argparse, yaml, logging
 from datetime import datetime
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +20,7 @@ import pandas as pd
 from src.data import DATASET_NAMES, get_dataset_info
 from src.data.datasets import PROCESSED_DIR, OUTPUT_DIR
 from src.models import Step1Trainer
-from src.utils import Timer, print_banner
+from src.utils import Timer, print_banner, save_json
 
 # ── ALL defaults ─────────────────────────────────────────────────────────
 
@@ -42,9 +42,11 @@ DEFAULTS = {
     'remove_hs':        True,
     'use_gpu':          True,
     'use_amp':          True,
-    'model_name':       'unimolv1',
     'freeze_layers':    None,
 }
+
+# This project targets UniMol v1 only.
+MODEL_NAME = 'unimolv1'
 
 CONFIG_KEYS = {'split_seed', 'n_confomer', 'gpu_id',
                'epochs', 'batch_size', 'learning_rate', 'patience'}
@@ -67,6 +69,7 @@ def resolve_params(args, cfg):
             params[key] = cfg[key]
         else:
             params[key] = default
+    params['model_name'] = MODEL_NAME
     return params
 
 
@@ -114,7 +117,6 @@ def main():
     parser.add_argument('--no-remove-hs',     action='store_true')
     parser.add_argument('--no-gpu',           action='store_true')
     parser.add_argument('--no-amp',           action='store_true')
-    parser.add_argument('--model-name',       type=str,   default=None)
     parser.add_argument('--freeze-layers',    type=str,   default=None)
     # Experiment
     parser.add_argument('--no-save', action='store_true')
@@ -137,6 +139,7 @@ def main():
     print_banner("UniMol-GP -- Step 1: Baseline Training")
     print(f"Time        : {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"Dataset     : {args.dataset} ({dataset_info['task_type']}, {dataset_info['metric']})")
+    print(f"model       : {params['model_name']}")
     print(f"split_seed  : {split_seed}")
     print(f"random_seed : {params['random_seed']}")
     print(f"n_confomer  : {params['n_confomer']}")
@@ -181,8 +184,7 @@ def main():
         out_dir = os.path.join(OUTPUT_DIR, 'step1', args.dataset,
                                f"seed_{split_seed}", timestamp)
         os.makedirs(out_dir, exist_ok=True)
-        with open(os.path.join(out_dir, 'results.json'), 'w') as f:
-            json.dump(results, f, indent=2)
+        save_json(results, os.path.join(out_dir, 'results.json'))
         print(f"Results saved -- {out_dir}/results.json")
     else:
         print("(--no-save: results not saved)")

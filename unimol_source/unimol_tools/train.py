@@ -162,47 +162,6 @@ class MolTrain(object):
         self.save_path = save_path
         self.config = config
 
-    # def fit(self, data):
-    #     """
-    #     Fit the model according to the given training data with multi datasource support, including SMILES csv file and custom coordinate data.
-
-    #     For example: custom coordinate data.
-
-    #     .. code-block:: python
-
-    #         from unimol_tools import MolTrain
-    #         import numpy as np
-    #         custom_data ={'target':np.random.randint(2, size=100),
-    #                     'atoms':[['C','C','H','H','H','H'] for _ in range(100)],
-    #                     'coordinates':[np.random.randn(6,3) for _ in range(100)],
-    #                     }
-
-    #         clf = MolTrain()
-    #         clf.fit(custom_data)
-    #     """
-    #     self.datahub = DataHub(
-    #         data=data, is_train=True, save_path=self.save_path, **self.config
-    #     )
-    #     self.data = self.datahub.data
-    #     self.update_and_save_config()
-    #     self.trainer = Trainer(save_path=self.save_path, **self.config)
-    #     self.model = NNModel(self.data, self.trainer, **self.config)
-    #     self.model.run()
-    #     scalar = self.data['target_scaler']
-    #     y_pred = self.model.cv['pred']
-    #     y_true = np.array(self.data['target'])
-    #     metrics = self.trainer.metrics
-    #     if scalar is not None:
-    #         y_pred = scalar.inverse_transform(y_pred)
-    #         y_true = scalar.inverse_transform(y_true)
-
-    #     if self.config["task"] in ['classification', 'multilabel_classification']:
-    #         threshold = metrics.calculate_classification_threshold(y_true, y_pred)
-    #         joblib.dump(threshold, os.path.join(self.save_path, 'threshold.dat'))
-
-    #     self.cv_pred = y_pred
-    #     return
-
     def fit(self, data):
         """
         Fit the model.

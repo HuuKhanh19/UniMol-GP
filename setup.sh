@@ -1,10 +1,10 @@
 #!/bin/bash
-# Setup script for CONAN Project
+# Setup script for UniMol-GP
 
 set -e
 
 echo "=============================================="
-echo "CONAN Project Setup"
+echo "UniMol-GP Setup"
 echo "=============================================="
 
 # Get the directory where the script is located
@@ -18,27 +18,20 @@ echo ""
 echo "Creating directories..."
 mkdir -p data/raw
 mkdir -p data/processed
-mkdir -p experiments/step1_baseline
-mkdir -p experiments/step2_eggroll
-mkdir -p experiments/step3_gp
+mkdir -p experiments
 mkdir -p logs
 
-# Check if unimol_tools exists
-if [ ! -d "unimol_tools" ]; then
+# unimol_source/ is a vendored, PATCHED fork of Uni-Mol tools -- do not replace it
+# with upstream: MolTrain.fit() here honours the external VALID column (so the
+# scaffold split is respected) and k-fold has been stripped out.
+if [ ! -d "unimol_source/unimol_tools" ]; then
     echo ""
-    echo "Cloning UniMol-tools..."
-    git clone https://github.com/dptech-corp/Uni-Mol.git temp_unimol
-    mv temp_unimol/unimol_tools ./unimol_tools
-    rm -rf temp_unimol
-else
-    echo "UniMol-tools already exists, skipping clone."
+    echo "ERROR: unimol_source/unimol_tools not found -- re-clone the repository."
+    exit 1
 fi
 
-# Install dependencies
-echo ""
-echo "Installing dependencies..."
-
 # Check if we're in a conda environment
+echo ""
 if [ -n "$CONDA_PREFIX" ]; then
     echo "Conda environment detected: $CONDA_PREFIX"
 else
@@ -46,17 +39,17 @@ else
     echo "Please activate your conda environment (e.g., conda activate conan_es)"
 fi
 
-# Install unimol_tools from source
+# Install the patched unimol_tools from source
 echo ""
-echo "Installing UniMol-tools from source..."
-cd unimol_tools
+echo "Installing UniMol-tools (patched fork) from source..."
+cd unimol_source
 pip install -e . --quiet
 cd ..
 
-# Install additional requirements
+# Install project requirements
 echo ""
-echo "Installing additional requirements..."
-pip install pandas scikit-learn pyyaml rdkit --quiet
+echo "Installing project requirements..."
+pip install -r requirements.txt --quiet
 
 echo ""
 echo "=============================================="
@@ -64,15 +57,15 @@ echo "Setup Complete!"
 echo "=============================================="
 echo ""
 echo "Next steps:"
-echo "1. Upload your data files to data/raw/"
+echo "1. Put your raw data files in data/raw/"
 echo "   - refined_ESOL.csv"
 echo "   - refined_FreeSolv.csv"
 echo "   - refined_Lipophilicity.csv"
 echo "   - refined_BACE.csv"
 echo ""
-echo "2. Preprocess data:"
-echo "   python scripts/preprocess_data.py --dataset all"
+echo "2. Scaffold-split the data (81/9/10):"
+echo "   python scripts/preprocess_data.py --dataset all --split-seed 0 1 2 3 4"
 echo ""
-echo "3. Run Step 1 training:"
-echo "   python scripts/run_step1.py --dataset all"
+echo "3. Train the UniMol v1 baseline:"
+echo "   python scripts/run_step1.py --dataset esol --split-seed 0"
 echo ""

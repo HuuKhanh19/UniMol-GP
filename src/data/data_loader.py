@@ -8,8 +8,7 @@ No dependency on config files — all parameters passed directly.
 import os
 import yaml
 import pandas as pd
-import numpy as np
-from typing import Dict, Any, Optional, Tuple
+from typing import Tuple
 
 from .splitters import random_scaffold_split
 from .datasets import get_dataset_info

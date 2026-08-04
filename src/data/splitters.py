@@ -1,20 +1,18 @@
 """
-Data splitting utilities for CONAN-SchNet.
+Scaffold splitting for UniMol-GP.
 
-Provides random scaffold split and random split for molecular datasets.
-Adapted from MolHFCNet repository.
+Bemis-Murcko scaffold grouping, then random assignment of whole scaffold
+groups to train/valid/test. Adapted from the MolHFCNet repository.
+
+With ratio_test=0.1 and ration_valid=0.1 the effective split is 81/9/10,
+because the valid budget is taken from the non-test portion:
+    n_valid = ration_valid * N * (1 - ratio_test) = 0.09 * N
 """
 
 import numpy as np
-import pandas as pd
 from collections import defaultdict
-from sklearn.model_selection import KFold, GroupKFold, StratifiedKFold, train_test_split
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
-
-# =============================================================================
-# Scaffold utilities
-# =============================================================================
 
 def generate_scaffold(smiles: str, include_chirality: bool = False) -> str:
     """Obtain Bemis-Murcko scaffold from a SMILES string."""
@@ -22,10 +20,6 @@ def generate_scaffold(smiles: str, include_chirality: bool = False) -> str:
         smiles=smiles, includeChirality=include_chirality
     )
 
-
-# =============================================================================
-# Split functions
-# =============================================================================
 
 def random_scaffold_split(
     dataset,
@@ -97,63 +91,3 @@ def random_scaffold_split(
             dataset[torch.tensor(valid_idx)],
             dataset[torch.tensor(test_idx)],
         )
-
-
-def random_split(
-    dataset,
-    random_seed: int = 8,
-    ratio_test: float = 0.1,
-    ration_valid: float = 0.1,
-):
-    """Simple random train/valid/test split.
-
-    Args:
-        dataset: DataFrame to split.
-        random_seed: Random seed.
-        ratio_test: Test fraction.
-        ration_valid: Validation fraction (of non-test portion).
-
-    Returns:
-        Tuple of (train_df, valid_df, test_df).
-    """
-    train_val, test_df = train_test_split(
-        dataset, test_size=ratio_test, random_state=random_seed
-    )
-    train_df, valid_df = train_test_split(
-        train_val, test_size=ration_valid, random_state=random_seed
-    )
-    print(f'  Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}')
-    return train_df, valid_df, test_df
-
-
-# =============================================================================
-# K-Fold Splitter (from MolHFCNet)
-# =============================================================================
-
-class Splitter:
-    """K-fold cross-validation splitter supporting random, scaffold, and stratified."""
-
-    def __init__(self, split_method: str = '5fold_random', seed: int = 42):
-        self.n_splits, self.method = (
-            int(split_method.split('fold')[0]),
-            split_method.split('_')[-1],
-        )
-        self.seed = seed
-        self.splitter = self._init_split()
-
-    def _init_split(self):
-        if self.method == 'random':
-            return KFold(n_splits=self.n_splits, shuffle=True, random_state=self.seed)
-        elif self.method in ('scaffold', 'group'):
-            return GroupKFold(n_splits=self.n_splits)
-        elif self.method == 'stratified':
-            return StratifiedKFold(
-                n_splits=self.n_splits, shuffle=True, random_state=self.seed
-            )
-        else:
-            raise ValueError(
-                f'Unknown split method: {self.n_splits}fold_{self.method}'
-            )
-
-    def split(self, data, target=None, group=None):
-        return self.splitter.split(data, target, group)
