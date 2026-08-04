@@ -50,7 +50,7 @@ DEFAULTS = {
     'lora_rank':        16,
     'lora_alpha':       16.0,
     # Step 2.2 -- ES / EGGROLL  (defaults tuned to fit ~1h/seed on 1x RTX 5070 Ti)
-    'es_sigma':         0.001,      # search range [1e-3, 1e-2]; smaller -> closer to gradient
+    'es_sigma':         0.01,      # search range [1e-3, 1e-2]; smaller -> closer to gradient
     'es_lr':            0.005,      # AdamW outer LR
     'es_lr_decay':      0.05,       # cosine final-LR fraction; 1.0 = constant (off). Try 0.0-0.05
     'es_popsize':       32,       # members/step (antithetic). 128-512 typical
