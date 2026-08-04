@@ -41,17 +41,37 @@ from src.head.genome import (
 )
 
 
+#: Relative tolerance for the evaluator. Tree outputs are clamped to 1e6, where
+#: one float32 ulp is already ~0.06, so an *absolute* tolerance would flag
+#: ordinary rounding on large values. A genuine stack-index bug evaluates a
+#: different subtree entirely and shows up as a relative error of order 1.
+EVAL_RTOL = 1e-4
+
+
+def _f32(r: np.ndarray) -> np.ndarray:
+    """Apply the operator-output guard and stay in float32."""
+    r = np.nan_to_num(r, nan=0.0, posinf=O.OUT_CLAMP, neginf=-O.OUT_CLAMP)
+    return np.clip(r, -O.OUT_CLAMP, O.OUT_CLAMP).astype(np.float32)
+
+
 def _reference_eval(pop: Population, i: int, x: np.ndarray) -> np.ndarray:
-    """Plain Python postfix interpreter -- the ground truth for `evaluator`."""
+    """Plain Python postfix interpreter -- the ground truth for `evaluator`.
+
+    Deliberately in float32, matching the evaluator: in float64 the two would
+    diverge by ordinary rounding on the clamped extremes and the comparison
+    would say nothing about whether the *indexing* is right, which is the thing
+    that can silently be wrong.
+    """
+    eps = np.float32(O.DIV_EPS)
     stack: list[np.ndarray] = []
     for t in range(int(pop.length[i])):
         op = int(pop.code[i, t])
         if op == O.NOP:
             continue
         if op == O.VAR:
-            stack.append(x[:, int(pop.arg[i, t])].astype(np.float64))
+            stack.append(x[:, int(pop.arg[i, t])].astype(np.float32))
         elif op == O.CONST:
-            stack.append(np.full(x.shape[0], float(pop.const[i, t]), dtype=np.float64))
+            stack.append(np.full(x.shape[0], pop.const[i, t], dtype=np.float32))
         elif O.ARITY[op] == 1:
             a = stack.pop()
             if op == O.TANH:
@@ -59,14 +79,12 @@ def _reference_eval(pop: Population, i: int, x: np.ndarray) -> np.ndarray:
             elif op == O.EXP:
                 r = np.exp(np.clip(a, -O.EXP_CLAMP, O.EXP_CLAMP))
             elif op == O.LOG:
-                r = np.log(np.abs(a) + O.LOG_EPS)
+                r = np.log(np.abs(a) + np.float32(O.LOG_EPS))
             elif op == O.SQRT:
                 r = np.sqrt(np.abs(a))
             else:
                 r = a * a
-            stack.append(np.clip(np.nan_to_num(r, posinf=O.OUT_CLAMP,
-                                               neginf=-O.OUT_CLAMP),
-                                 -O.OUT_CLAMP, O.OUT_CLAMP))
+            stack.append(_f32(r))
         else:
             b, a = stack.pop(), stack.pop()
             if op == O.ADD:
@@ -76,12 +94,10 @@ def _reference_eval(pop: Population, i: int, x: np.ndarray) -> np.ndarray:
             elif op == O.MUL:
                 r = a * b
             else:
-                safe = np.where(np.abs(b) < O.DIV_EPS,
-                                np.where(b < 0, -O.DIV_EPS, O.DIV_EPS), b)
+                safe = np.where(np.abs(b) < eps,
+                                np.where(b < 0, -eps, eps).astype(np.float32), b)
                 r = a / safe
-            stack.append(np.clip(np.nan_to_num(r, posinf=O.OUT_CLAMP,
-                                               neginf=-O.OUT_CLAMP),
-                                 -O.OUT_CLAMP, O.OUT_CLAMP))
+            stack.append(_f32(r))
     return stack[-1]
 
 
@@ -91,13 +107,39 @@ def check_evaluator(device: str = 'cpu') -> None:
     pop = random_population(200, cols, rng, max_depth=5, min_depth=1)
     x = rng.normal(size=(97, 24)).astype(np.float32)
 
-    got = evaluate(pop, torch.from_numpy(x).to(device)).double().cpu().numpy()
-    worst = 0.0
-    for i in range(pop.size):
-        want = _reference_eval(pop, i, x)
-        worst = max(worst, float(np.max(np.abs(got[i] - want))))
-    assert worst < 1e-4, f'evaluator mismatch, max |diff| = {worst:.3e}'
-    print(f'  evaluator      ok   (max |diff| = {worst:.2e}, {pop.size} trees)')
+    got = evaluate(pop, torch.from_numpy(x)).numpy()
+    want = np.stack([_reference_eval(pop, i, x) for i in range(pop.size)])
+
+    # Floor the scale at 1 so near-zero outputs are judged absolutely.
+    rel = np.abs(got - want) / np.maximum(np.abs(want), 1.0)
+    per_tree = rel.max(axis=1)
+    bad = np.nonzero(per_tree > EVAL_RTOL)[0]
+
+    if bad.size:
+        j = int(per_tree.argmax())
+        k = int(np.abs(got[j] - want[j]).argmax())
+        diagnosis = ('most trees disagree -- this is a stack-indexing bug, '
+                     'not rounding' if bad.size > pop.size // 10 else
+                     'only a few trees disagree -- check the magnitudes below')
+        raise AssertionError(
+            f'{bad.size}/{pop.size} trees exceed rtol={EVAL_RTOL:.0e} '
+            f'({diagnosis})\n'
+            f'      worst tree {j}: rel={per_tree[j]:.3e} '
+            f'got={got[j, k]:.6g} want={want[j, k]:.6g}\n'
+            f'      formula: {to_infix(pop, j)[:120]}'
+        )
+    print(f'  evaluator      ok   (max rel = {per_tree.max():.2e} over '
+          f'{pop.size} trees, |out| up to {np.abs(want).max():.2e})')
+
+    if device != 'cpu':
+        on_dev = evaluate(pop, torch.from_numpy(x).to(device)).cpu().numpy()
+        # exp/tanh/log differ by ~1 ulp between libm and CUDA, and a deep tree
+        # amplifies that, so this is a consistency check, not an equality one.
+        dev_rel = float(
+            (np.abs(on_dev - got) / np.maximum(np.abs(got), 1.0)).max()
+        )
+        assert dev_rel < 1e-2, f'{device} disagrees with cpu, max rel = {dev_rel:.3e}'
+        print(f'  evaluator/{device:<4} ok   (max rel vs cpu = {dev_rel:.2e})')
 
 
 def check_genome() -> None:
@@ -160,7 +202,7 @@ def check_ridge(device: str = 'cpu') -> None:
 
 def check_split(device: str = 'cuda', n_mol: int = 6) -> None:
     """sigma=0 through SplitUniMol must equal the stock UniMolModel CLS."""
-    from unimol_tools.data import ConformerGen
+    from unimol_tools.data.conformer import ConformerGen
     from unimol_tools.models.unimol import UniMolModel
 
     from src.es.forward_unimol import ESSpec, SplitUniMol

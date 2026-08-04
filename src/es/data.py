@@ -37,7 +37,7 @@ class MoleculeData:
 
     def __init__(self, smiles: list[str], targets: np.ndarray, model,
                  remove_hs: bool = False, seed: int = 42):
-        from unimol_tools.data import ConformerGen
+        from unimol_tools.data.conformer import ConformerGen
 
         self.smiles = list(smiles)
         self.model = model
