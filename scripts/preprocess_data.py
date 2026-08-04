@@ -2,8 +2,7 @@
 """
 Preprocess: clean raw CSVs and write Bemis-Murcko scaffold splits.
 
-Configuration precedence: CLI flag > config.yaml > argparse default, the same
-scheme as run_step1.py -- config.yaml is folded into the parser defaults.
+All configuration lives in argparse, like run_step1.py. There is no config file.
 
 Output: data/processed/{dataset}/seed_{n}/{dataset}_{train,valid,test}.csv
 
@@ -23,14 +22,8 @@ from collections.abc import Sequence
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.data import DATASET_NAMES, load_config, prepare_dataset  # noqa: E402
+from src.data import DATASET_NAMES, prepare_dataset  # noqa: E402
 from src.data.datasets import PROCESSED_DIR, RAW_DIR, SPLIT_RATIO  # noqa: E402
-
-DEFAULT_CONFIG = 'config.yaml'
-
-#: Keys config.yaml may set for this script. run_step1.py owns the rest, so
-#: they are accepted and ignored here rather than treated as typos.
-CONFIG_KEYS = frozenset({'split_seed'})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,28 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="dataset key, or 'all' for every registered one")
     parser.add_argument('--split-seed', type=int, nargs='+', default=[0],
                         help='one or more scaffold-split seeds')
-    parser.add_argument('--config', default=DEFAULT_CONFIG,
-                        help='YAML file overriding the defaults above')
     return parser
 
 
-def _config_path(argv: Sequence[str] | None) -> str:
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('--config', default=DEFAULT_CONFIG)
-    return pre.parse_known_args(argv)[0].config
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = build_parser()
-    cfg = load_config(_config_path(argv))
-    parser.set_defaults(**{k: v for k, v in cfg.items() if k in CONFIG_KEYS})
-
-    args = parser.parse_args(argv)
-    # config.yaml carries a scalar split_seed (run_step1.py trains one seed at
-    # a time); this script takes a list, so normalise whatever we ended up with.
-    if not isinstance(args.split_seed, list):
-        args.split_seed = [args.split_seed]
-    return args
+    """Parse the command line. Defaults come from build_parser(), nowhere else."""
+    return build_parser().parse_args(argv)
 
 
 def preprocess(dataset_name: str, split_seed: int) -> tuple[int, int, int]:

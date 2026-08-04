@@ -2,10 +2,9 @@
 """
 Step 1: UniMol v1 baseline training (gradient descent).
 
-Configuration precedence: CLI flag > config.yaml > argparse default.
-config.yaml is loaded into the parser with ``set_defaults``, so every knob has
-exactly one declared default -- the ``add_argument`` call -- and ``--help``
-prints the values that would actually be used.
+All configuration lives in argparse: ``add_argument`` is the single declaration
+site for every knob and its default, and ``--help`` is the full reference. There
+is no config file.
 
 Usage:
     python scripts/run_step1.py --dataset esol
@@ -28,7 +27,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.data import DATASET_NAMES, get_dataset_info, load_config  # noqa: E402
+from src.data import DATASET_NAMES, get_dataset_info  # noqa: E402
 from src.data.datasets import OUTPUT_DIR, PROCESSED_DIR  # noqa: E402
 from src.models import Step1Trainer  # noqa: E402
 from src.utils import Timer, print_banner, save_json  # noqa: E402
@@ -36,20 +35,8 @@ from src.utils import Timer, print_banner, save_json  # noqa: E402
 #: This project targets UniMol v1 only, so the model is not a CLI knob.
 MODEL_NAME = 'unimolv1'
 
-DEFAULT_CONFIG = 'config.yaml'
-
-#: Keys config.yaml may set. Each must match an argparse destination below;
-#: anything else is a typo and is rejected rather than silently ignored.
-CONFIG_KEYS = frozenset({
-    'split_seed', 'random_seed',
-    'epochs', 'batch_size', 'learning_rate', 'patience',
-    'warmup_ratio', 'max_norm',
-    'target_normalize', 'remove_hs', 'freeze_layers',
-    'gpu_id', 'use_gpu', 'use_amp',
-})
-
 #: Parsed arguments that steer the script rather than the model.
-NON_PARAM_DESTS = frozenset({'dataset', 'config', 'no_save'})
+NON_PARAM_DESTS = frozenset({'dataset', 'no_save'})
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -64,8 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--dataset', required=True, choices=DATASET_NAMES,
                         default=argparse.SUPPRESS,
                         help='dataset key from the registry')
-    parser.add_argument('--config', default=DEFAULT_CONFIG,
-                        help='YAML file overriding the defaults below')
 
     split = parser.add_argument_group('data split')
     split.add_argument('--split-seed', type=int, default=0,
@@ -114,26 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _config_path(argv: Sequence[str] | None) -> str:
-    """Read --config before the main parser needs its values."""
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('--config', default=DEFAULT_CONFIG)
-    return pre.parse_known_args(argv)[0].config
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Build the parser, fold config.yaml into its defaults, then parse."""
-    parser = build_parser()
-    cfg = load_config(_config_path(argv))
-
-    unknown = sorted(set(cfg) - CONFIG_KEYS)
-    if unknown:
-        parser.error(
-            f"unknown key(s) in config: {', '.join(unknown)}\n"
-            f"allowed: {', '.join(sorted(CONFIG_KEYS))}")
-
-    parser.set_defaults(**cfg)
-    return parser.parse_args(argv)
+    """Parse the command line. Defaults come from build_parser(), nowhere else."""
+    return build_parser().parse_args(argv)
 
 
 def resolve_unimol_source() -> str:

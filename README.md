@@ -6,7 +6,6 @@ Bemis-Murcko scaffold split.
 ## Layout
 
 ```
-config.yaml              tunable hyperparameters (CLI > config.yaml > script defaults)
 data/raw/                refined_*.csv source files (not tracked)
 data/processed/          scaffold splits, one dir per dataset/seed (not tracked)
 experiments/             training runs + results.json (not tracked)
@@ -42,33 +41,27 @@ python scripts/preprocess_data.py --dataset all --split-seed 0 1 2 3 4
 # 2. Train + evaluate one seed
 python scripts/run_step1.py --dataset esol --split-seed 0
 
-# Every knob is a flag; --help lists them with their effective defaults
+# Every knob is a flag; --help is the full reference
 python scripts/run_step1.py --dataset esol --split-seed 2 --epochs 50 --gpu-id 1
 python scripts/run_step1.py --help
 ```
 
 ### Configuration
 
-`config.yaml` is folded into the argparse defaults with `set_defaults`, so the
-precedence is:
+**Argparse only — no config file, no Hydra.** `add_argument` is the single
+declaration site for every option and its default, so `--help` is the complete
+and authoritative reference; there is no second place a value can come from and
+no precedence order to reason about. To change a default permanently, edit the
+`add_argument` call.
 
-```
-CLI flag  >  config.yaml  >  the default declared in add_argument()
-```
+Options are grouped (`data split`, `training`, `featurisation`, `hardware`,
+`output`) so `--help` reads as documentation. Boolean flags are
+single-direction — `--no-gpu`, `--no-amp`, `--remove-hs` — and write to the
+positive destination (`use_gpu`, `use_amp`, `remove_hs`).
 
-Each option therefore has exactly one declared default, and `--help` prints the
-value that would actually be used. Keys in `config.yaml` must match an argparse
-destination — an unknown key aborts the run and lists the valid ones, so a typo
-or a stale key fails loudly instead of being silently ignored:
-
-```
-run_step1.py: error: unknown key(s) in config: lrate, n_confomer
-allowed: batch_size, epochs, freeze_layers, gpu_id, learning_rate, ...
-```
-
-Boolean flags are single-direction (`--no-gpu`, `--no-amp`, `--remove-hs`) and
-write to the positive destination (`use_gpu`, `use_amp`, `remove_hs`), which is
-also the name to use in `config.yaml`.
+For repeatable runs, put the flags in a shell script or record the exact command
+in your notes; `results.json` also stores the fully resolved `params` of every
+run, so any result can be traced back to the settings that produced it.
 
 Results land in `experiments/step1/{dataset}/seed_{X}/{timestamp}/results.json`
 together with the checkpoint, so a 5-seed mean is just an average over the five

@@ -10,18 +10,9 @@ from __future__ import annotations
 import os
 
 import pandas as pd
-import yaml
 
 from .datasets import get_dataset_info
 from .splitters import random_scaffold_split
-
-
-def load_config(path: str) -> dict:
-    """Load a YAML file. Returns empty dict if file not found."""
-    if not os.path.exists(path):
-        return {}
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
 
 
 def load_raw_data(raw_dir: str, filename: str) -> pd.DataFrame:

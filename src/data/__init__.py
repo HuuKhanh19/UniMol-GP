@@ -1,6 +1,6 @@
 """Data loading and preprocessing module."""
 
-from .data_loader import load_config, prepare_dataset
+from .data_loader import prepare_dataset
 from .datasets import (
     DATASET_NAMES,
     DATASET_REGISTRY,
@@ -21,7 +21,6 @@ __all__ = [
     'SPLIT_RATIO',
     'generate_scaffold',
     'get_dataset_info',
-    'load_config',
     'prepare_dataset',
     'random_scaffold_split',
 ]
