@@ -1,5 +1,5 @@
 """Models module."""
 
-from .unimol_wrapper import UniMolWrapper, Step1Trainer
+from .unimol_wrapper import Step1Trainer, UniMolWrapper
 
-__all__ = ['UniMolWrapper', 'Step1Trainer']
+__all__ = ['Step1Trainer', 'UniMolWrapper']

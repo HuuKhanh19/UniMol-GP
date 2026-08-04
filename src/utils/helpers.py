@@ -4,9 +4,11 @@ Utility Functions
 Common utilities for timing, JSON I/O and console output.
 """
 
-import time
+from __future__ import annotations
+
 import json
-from typing import Dict, Any
+import time
+from typing import Any
 
 
 class Timer:
@@ -33,15 +35,15 @@ class Timer:
         return time.time() - self.start_time
 
 
-def save_json(data: Dict[str, Any], path: str):
+def save_json(data: dict[str, Any], path: str):
     """Save dictionary to JSON file."""
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
 
 
-def load_json(path: str) -> Dict[str, Any]:
+def load_json(path: str) -> dict[str, Any]:
     """Load dictionary from JSON file."""
-    with open(path, 'r') as f:
+    with open(path) as f:
         return json.load(f)
 
 

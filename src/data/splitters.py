@@ -9,8 +9,9 @@ because the valid budget is taken from the non-test portion:
     n_valid = ration_valid * N * (1 - ratio_test) = 0.09 * N
 """
 
-import numpy as np
 from collections import defaultdict
+
+import numpy as np
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 

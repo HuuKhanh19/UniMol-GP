@@ -1,12 +1,20 @@
-# UniMol-GP -- Tunable hyperparameters (finetune here)
-# Priority: CLI > config.yaml > script defaults
+# UniMol-GP -- default hyperparameters.
+#
+# Loaded into the argparse defaults of scripts/run_step1.py, so precedence is:
+#     CLI flag  >  this file  >  the default declared in add_argument()
+#
+# Every key must match an argparse destination (see run_step1.py --help); an
+# unknown key aborts the run instead of being silently ignored. Delete a key to
+# fall back to the script default.
 
-# Shared (all steps)
+# Data split
 split_seed: 0
-gpu_id: 0
 
-# Step 1 -- Gradient Descent
+# Training
 epochs: 100
 batch_size: 32
 learning_rate: 0.0001
 patience: 10
+
+# Hardware
+gpu_id: 0

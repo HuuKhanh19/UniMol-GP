@@ -1,68 +1,115 @@
 #!/usr/bin/env python
 """
-Preprocess: scaffold-split raw data into train/valid/test.
+Preprocess: clean raw CSVs and write Bemis-Murcko scaffold splits.
+
+Configuration precedence: CLI flag > config.yaml > argparse default, the same
+scheme as run_step1.py -- config.yaml is folded into the parser defaults.
+
+Output: data/processed/{dataset}/seed_{n}/{dataset}_{train,valid,test}.csv
 
 Usage:
-    python scripts/preprocess_data.py --dataset esol --split-seed 0
+    python scripts/preprocess_data.py --dataset esol
     python scripts/preprocess_data.py --dataset esol --split-seed 0 1 2 3 4
     python scripts/preprocess_data.py --dataset all --split-seed 0 1 2 3 4
 """
 
-import os, sys, argparse, yaml
+from __future__ import annotations
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
+import argparse
+import os
+import sys
+from collections.abc import Sequence
 
-from src.data import DATASET_NAMES, prepare_dataset
-from src.data.datasets import RAW_DIR, PROCESSED_DIR, SPLIT_RATIO
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
+from src.data import DATASET_NAMES, load_config, prepare_dataset  # noqa: E402
+from src.data.datasets import PROCESSED_DIR, RAW_DIR, SPLIT_RATIO  # noqa: E402
+
+DEFAULT_CONFIG = 'config.yaml'
+
+#: Keys config.yaml may set for this script. run_step1.py owns the rest, so
+#: they are accepted and ignored here rather than treated as typos.
+CONFIG_KEYS = frozenset({'split_seed'})
 
 
-def load_config(path="config.yaml"):
-    if os.path.exists(path):
-        with open(path) as f:
-            return yaml.safe_load(f) or {}
-    return {}
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='preprocess_data.py',
+        description='Clean raw CSVs and write scaffold splits.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument('--dataset', default='all',
+                        choices=['all'] + DATASET_NAMES,
+                        help="dataset key, or 'all' for every registered one")
+    parser.add_argument('--split-seed', type=int, nargs='+', default=[0],
+                        help='one or more scaffold-split seeds')
+    parser.add_argument('--config', default=DEFAULT_CONFIG,
+                        help='YAML file overriding the defaults above')
+    return parser
 
 
-def preprocess(dataset_name, split_seed):
+def _config_path(argv: Sequence[str] | None) -> str:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--config', default=DEFAULT_CONFIG)
+    return pre.parse_known_args(argv)[0].config
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    cfg = load_config(_config_path(argv))
+    parser.set_defaults(**{k: v for k, v in cfg.items() if k in CONFIG_KEYS})
+
+    args = parser.parse_args(argv)
+    # config.yaml carries a scalar split_seed (run_step1.py trains one seed at
+    # a time); this script takes a list, so normalise whatever we ended up with.
+    if not isinstance(args.split_seed, list):
+        args.split_seed = [args.split_seed]
+    return args
+
+
+def preprocess(dataset_name: str, split_seed: int) -> tuple[int, int, int]:
+    """Split one dataset at one seed and write the three CSVs."""
     train_df, valid_df, test_df, _ = prepare_dataset(
         dataset_name, raw_dir=RAW_DIR,
         split_ratio=SPLIT_RATIO, split_seed=split_seed,
     )
-    # Save to: data/processed/{dataset}/seed_{X}/
-    out_dir = os.path.join(PROCESSED_DIR, dataset_name, f"seed_{split_seed}")
+    frames = (('train', train_df), ('valid', valid_df), ('test', test_df))
+
+    out_dir = os.path.join(PROCESSED_DIR, dataset_name, f'seed_{split_seed}')
     os.makedirs(out_dir, exist_ok=True)
-    for name, df in [('train', train_df), ('valid', valid_df), ('test', test_df)]:
-        df.to_csv(os.path.join(out_dir, f"{dataset_name}_{name}.csv"), index=False)
-    print(f"  Saved → {out_dir}/")
+    for name, df in frames:
+        df.to_csv(os.path.join(out_dir, f'{dataset_name}_{name}.csv'),
+                  index=False)
+
+    print(f'  Saved -> {out_dir}/')
     return len(train_df), len(valid_df), len(test_df)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Preprocess molecular datasets")
-    parser.add_argument('--dataset', type=str, default='all',
-                        choices=['all'] + DATASET_NAMES)
-    parser.add_argument('--split-seed', type=int, nargs='+', default=None)
-    parser.add_argument('--config', type=str, default='config.yaml')
-    args = parser.parse_args()
-    os.chdir(project_root)
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    os.chdir(PROJECT_ROOT)
 
-    cfg = load_config(args.config)
-    seeds = args.split_seed if args.split_seed is not None else [cfg.get('split_seed', 0)]
-    datasets = DATASET_NAMES if args.dataset == 'all' else [args.dataset]
+    datasets: list[str] = (DATASET_NAMES if args.dataset == 'all'
+                           else [args.dataset])
+    print(f'\nPreprocessing | datasets={datasets} | seeds={args.split_seed}')
+    print('=' * 60)
 
-    print(f"\nPreprocessing | datasets={datasets} | seeds={seeds}")
-    print("=" * 60)
-    for ds in datasets:
-        for seed in seeds:
-            print(f"\n{ds.upper()} (split_seed={seed})")
+    failed = 0
+    for dataset in datasets:
+        for seed in args.split_seed:
+            print(f'\n{dataset.upper()} (split_seed={seed})')
             try:
-                n_tr, n_va, n_te = preprocess(ds, seed)
-                print(f"  Train={n_tr}, Valid={n_va}, Test={n_te}")
-            except FileNotFoundError as e:
-                print(f"  Skipped: {e}")
-    print(f"\n{'='*60}\nDone.")
+                n_train, n_valid, n_test = preprocess(dataset, seed)
+            except FileNotFoundError as exc:
+                print(f'  Skipped: {exc}')
+                failed += 1
+                continue
+            print(f'  Train={n_train}, Valid={n_valid}, Test={n_test}')
+
+    print(f"\n{'=' * 60}\nDone." + (f' ({failed} skipped)' if failed else ''))
+    return 1 if failed else 0
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    sys.exit(main())

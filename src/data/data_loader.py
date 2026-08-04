@@ -5,13 +5,15 @@ Loads raw CSV, cleans SMILES, applies scaffold split.
 No dependency on config files — all parameters passed directly.
 """
 
-import os
-import yaml
-import pandas as pd
-from typing import Tuple
+from __future__ import annotations
 
-from .splitters import random_scaffold_split
+import os
+
+import pandas as pd
+import yaml
+
 from .datasets import get_dataset_info
+from .splitters import random_scaffold_split
 
 
 def load_config(path: str) -> dict:
@@ -82,7 +84,7 @@ def prepare_dataset(
     raw_dir: str = "data/raw",
     split_ratio: tuple = (0.8, 0.1, 0.1),
     split_seed: int = 0,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     """
     Load, preprocess, and scaffold-split a dataset.
 

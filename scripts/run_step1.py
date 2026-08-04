@@ -1,193 +1,244 @@
 #!/usr/bin/env python
 """
-Step 1: Baseline UniMol Training (Gradient Descent).
+Step 1: UniMol v1 baseline training (gradient descent).
 
-Priority: CLI > config.yaml > DEFAULTS below.
+Configuration precedence: CLI flag > config.yaml > argparse default.
+config.yaml is loaded into the parser with ``set_defaults``, so every knob has
+exactly one declared default -- the ``add_argument`` call -- and ``--help``
+prints the values that would actually be used.
 
 Usage:
     python scripts/run_step1.py --dataset esol
     python scripts/run_step1.py --dataset esol --split-seed 2 --epochs 50
-    python scripts/run_step1.py --dataset esol --gpu-id 1
+    python scripts/run_step1.py --dataset esol --gpu-id 1 --no-amp
 """
 
-import os, sys, argparse, yaml, logging
-from datetime import datetime
+from __future__ import annotations
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
+import argparse
+import logging
+import os
+import sys
+from collections.abc import Sequence
+from datetime import datetime
+from typing import Any
 
 import pandas as pd
-from src.data import DATASET_NAMES, get_dataset_info
-from src.data.datasets import PROCESSED_DIR, OUTPUT_DIR
-from src.models import Step1Trainer
-from src.utils import Timer, print_banner, save_json
 
-# ── ALL defaults ─────────────────────────────────────────────────────────
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
-DEFAULTS = {
-    # Shared
-    'split_seed':       0,
-    'random_seed':      42,
-    'gpu_id':           0,
-    # Step 1 tunable (config.yaml)
-    'epochs':           100,
-    'batch_size':       32,
-    'learning_rate':    0.0001,
-    'patience':         10,
-    # Rarely changed
-    'warmup_ratio':     0.03,
-    'max_norm':         5.0,
-    'target_normalize': 'auto',
-    'remove_hs':        True,
-    'use_gpu':          True,
-    'use_amp':          True,
-    'freeze_layers':    None,
-}
+from src.data import DATASET_NAMES, get_dataset_info, load_config  # noqa: E402
+from src.data.datasets import OUTPUT_DIR, PROCESSED_DIR  # noqa: E402
+from src.models import Step1Trainer  # noqa: E402
+from src.utils import Timer, print_banner, save_json  # noqa: E402
 
-# This project targets UniMol v1 only.
+#: This project targets UniMol v1 only, so the model is not a CLI knob.
 MODEL_NAME = 'unimolv1'
 
-CONFIG_KEYS = {'split_seed', 'gpu_id',
-               'epochs', 'batch_size', 'learning_rate', 'patience'}
+DEFAULT_CONFIG = 'config.yaml'
+
+#: Keys config.yaml may set. Each must match an argparse destination below;
+#: anything else is a typo and is rejected rather than silently ignored.
+CONFIG_KEYS = frozenset({
+    'split_seed', 'random_seed',
+    'epochs', 'batch_size', 'learning_rate', 'patience',
+    'warmup_ratio', 'max_norm',
+    'target_normalize', 'remove_hs', 'freeze_layers',
+    'gpu_id', 'use_gpu', 'use_amp',
+})
+
+#: Parsed arguments that steer the script rather than the model.
+NON_PARAM_DESTS = frozenset({'dataset', 'config', 'no_save'})
 
 
-def load_config(path='config.yaml'):
-    if os.path.exists(path):
-        with open(path) as f:
-            return yaml.safe_load(f) or {}
-    return {}
+# ── CLI ──────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    """Declare every option, with its default, in one place."""
+    parser = argparse.ArgumentParser(
+        prog='run_step1.py',
+        description='Step 1: UniMol v1 baseline training (gradient descent).',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument('--dataset', required=True, choices=DATASET_NAMES,
+                        default=argparse.SUPPRESS,
+                        help='dataset key from the registry')
+    parser.add_argument('--config', default=DEFAULT_CONFIG,
+                        help='YAML file overriding the defaults below')
+
+    split = parser.add_argument_group('data split')
+    split.add_argument('--split-seed', type=int, default=0,
+                       help='which scaffold split to train on')
+    split.add_argument('--random-seed', type=int, default=42,
+                       help='training seed; unrelated to --split-seed')
+
+    train = parser.add_argument_group('training')
+    train.add_argument('--epochs', type=int, default=100,
+                       help='maximum epochs; early stopping may cut it short')
+    train.add_argument('--batch-size', type=int, default=32,
+                       help='molecules per optimiser step')
+    train.add_argument('--learning-rate', type=float, default=1e-4,
+                       help='peak LR after warmup')
+    train.add_argument('--patience', type=int, default=10,
+                       help='early-stopping patience, in epochs')
+    train.add_argument('--warmup-ratio', type=float, default=0.03,
+                       help='fraction of total steps spent warming up the LR')
+    train.add_argument('--max-norm', type=float, default=5.0,
+                       help='gradient-clipping norm')
+
+    feat = parser.add_argument_group('featurisation')
+    feat.add_argument('--target-normalize', default='auto',
+                      help="target scaler: 'auto' or 'none'")
+    feat.add_argument('--no-remove-hs', dest='remove_hs', action='store_false',
+                      default=True,
+                      help='keep hydrogens; the pretrained checkpoint is '
+                           'no-H, so remove_hs defaults to %(default)s')
+    feat.add_argument('--freeze-layers', default=None,
+                      help='comma-separated encoder layers to freeze')
+
+    hardware = parser.add_argument_group('hardware')
+    hardware.add_argument('--gpu-id', type=int, default=0,
+                          help='CUDA device index; ignored without a GPU')
+    hardware.add_argument('--no-gpu', dest='use_gpu', action='store_false',
+                          default=True,
+                          help='force CPU (use_gpu default: %(default)s)')
+    hardware.add_argument('--no-amp', dest='use_amp', action='store_false',
+                          default=True,
+                          help='disable mixed precision '
+                               '(use_amp default: %(default)s)')
+
+    output = parser.add_argument_group('output')
+    output.add_argument('--no-save', action='store_true',
+                        help='run without writing results.json')
+    return parser
 
 
-def resolve_params(args, cfg):
-    params = {}
-    for key, default in DEFAULTS.items():
-        cli_val = getattr(args, key, None)
-        if cli_val is not None:
-            params[key] = cli_val
-        elif key in CONFIG_KEYS and key in cfg:
-            params[key] = cfg[key]
-        else:
-            params[key] = default
+def _config_path(argv: Sequence[str] | None) -> str:
+    """Read --config before the main parser needs its values."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--config', default=DEFAULT_CONFIG)
+    return pre.parse_known_args(argv)[0].config
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Build the parser, fold config.yaml into its defaults, then parse."""
+    parser = build_parser()
+    cfg = load_config(_config_path(argv))
+
+    unknown = sorted(set(cfg) - CONFIG_KEYS)
+    if unknown:
+        parser.error(
+            f"unknown key(s) in config: {', '.join(unknown)}\n"
+            f"allowed: {', '.join(sorted(CONFIG_KEYS))}")
+
+    parser.set_defaults(**cfg)
+    return parser.parse_args(argv)
+
+
+def training_params(args: argparse.Namespace) -> dict[str, Any]:
+    """Everything the trainer needs, keyed exactly as UniMolWrapper expects."""
+    params = {k: v for k, v in vars(args).items() if k not in NON_PARAM_DESTS}
     params['model_name'] = MODEL_NAME
     return params
 
 
-def load_split(dataset_name, split_seed):
-    seed_dir = os.path.join(PROCESSED_DIR, dataset_name, f"seed_{split_seed}")
-    paths = {s: os.path.join(seed_dir, f"{dataset_name}_{s}.csv")
+# ── Data ─────────────────────────────────────────────────────────────────
+
+def load_split(dataset_name: str, split_seed: int
+               ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load the train/valid/test CSVs written by preprocess_data.py."""
+    seed_dir = os.path.join(PROCESSED_DIR, dataset_name, f'seed_{split_seed}')
+    paths = {s: os.path.join(seed_dir, f'{dataset_name}_{s}.csv')
              for s in ('train', 'valid', 'test')}
-    missing = [p for p in paths.values() if not os.path.exists(p)]
-    if missing:
+    if any(not os.path.exists(p) for p in paths.values()):
         raise FileNotFoundError(
-            f"Data not found at {seed_dir}/\n"
-            f"Run: python scripts/preprocess_data.py "
-            f"--dataset {dataset_name} --split-seed {split_seed}")
+            f'Data not found at {seed_dir}/\n'
+            f'Run: python scripts/preprocess_data.py '
+            f'--dataset {dataset_name} --split-seed {split_seed}')
     return tuple(pd.read_csv(paths[s]) for s in ('train', 'valid', 'test'))
 
 
-def set_clean_log_format():
+# ── Console ──────────────────────────────────────────────────────────────
+
+def set_clean_log_format() -> None:
+    """Strip timestamps/levels from unimol_tools log lines."""
     fmt = logging.Formatter('%(message)s')
-    for name in ['Uni-Mol Tools', 'unimol', '']:
-        lg = logging.getLogger(name)
-        for h in lg.handlers:
-            h.setFormatter(fmt)
+    for name in ('Uni-Mol Tools', 'unimol', ''):
+        for handler in logging.getLogger(name).handlers:
+            handler.setFormatter(fmt)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Step 1: Baseline UniMol Training",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument('--dataset', type=str, required=True, choices=DATASET_NAMES)
-    # Shared
-    parser.add_argument('--split-seed',    type=int,   default=None)
-    parser.add_argument('--gpu-id',        type=int,   default=None)
-    # Step 1 tunable
-    parser.add_argument('--epochs',        type=int,   default=None)
-    parser.add_argument('--batch-size',    type=int,   default=None)
-    parser.add_argument('--learning-rate', type=float, default=None)
-    parser.add_argument('--patience',      type=int,   default=None)
-    # Rarely changed
-    parser.add_argument('--random-seed',      type=int,   default=None)
-    parser.add_argument('--warmup-ratio',     type=float, default=None)
-    parser.add_argument('--max-norm',         type=float, default=None)
-    parser.add_argument('--target-normalize', type=str,   default=None)
-    parser.add_argument('--no-remove-hs',     action='store_true')
-    parser.add_argument('--no-gpu',           action='store_true')
-    parser.add_argument('--no-amp',           action='store_true')
-    parser.add_argument('--freeze-layers',    type=str,   default=None)
-    # Experiment
-    parser.add_argument('--no-save', action='store_true')
-    parser.add_argument('--config',  type=str, default='config.yaml')
+def print_header(args: argparse.Namespace, params: dict[str, Any],
+                 dataset_info: dict[str, Any], out_dir: str | None) -> None:
+    print_banner('UniMol-GP -- Step 1: Baseline Training')
+    rows: list[tuple[str, Any]] = [
+        ('Time', f'{datetime.now():%Y-%m-%d %H:%M:%S}'),
+        ('Dataset', (f"{args.dataset} "
+                     f"({dataset_info['task_type']}, {dataset_info['metric']})")),
+        ('Model', params['model_name']),
+        ('Split seed', params['split_seed']),
+        ('Random seed', params['random_seed']),
+        ('Epochs', params['epochs']),
+        ('Batch size', params['batch_size']),
+        ('Learning rate', params['learning_rate']),
+        ('Patience', params['patience']),
+        ('Warmup ratio', params['warmup_ratio']),
+        ('Max norm', params['max_norm']),
+        ('Target scaler', params['target_normalize']),
+        ('Remove Hs', params['remove_hs']),
+        ('GPU / AMP', (f"{params['use_gpu']} / {params['use_amp']} "
+                       f"(gpu_id={params['gpu_id']})")),
+        ('Save to', out_dir or '(--no-save)'),
+    ]
+    for label, value in rows:
+        print(f'{label:<14}: {value}')
 
-    args = parser.parse_args()
-    args.remove_hs = False if args.no_remove_hs else None
-    args.use_gpu   = False if args.no_gpu else None
-    args.use_amp   = False if args.no_amp else None
 
-    os.chdir(project_root)
-    cfg = load_config(args.config)
-    params = resolve_params(args, cfg)
+# ── Entry point ──────────────────────────────────────────────────────────
 
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    os.chdir(PROJECT_ROOT)
+
+    params = training_params(args)
     dataset_info = get_dataset_info(args.dataset)
-    split_seed = params['split_seed']
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    experiment_name = os.path.join(
+        'step1', args.dataset, f"seed_{params['split_seed']}", timestamp)
+    out_dir = None if args.no_save else os.path.join(OUTPUT_DIR, experiment_name)
 
-    # Header
-    print_banner("UniMol-GP -- Step 1: Baseline Training")
-    print(f"Time        : {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"Dataset     : {args.dataset} ({dataset_info['task_type']}, {dataset_info['metric']})")
-    print(f"model       : {params['model_name']}")
-    print(f"split_seed  : {split_seed}")
-    print(f"random_seed : {params['random_seed']}")
-    print(f"gpu_id      : {params['gpu_id']}")
-    print(f"epochs      : {params['epochs']}")
-    print(f"batch_size  : {params['batch_size']}")
-    print(f"lr          : {params['learning_rate']}")
-    print(f"patience    : {params['patience']}")
-    print(f"warmup      : {params['warmup_ratio']}")
-    print(f"max_norm    : {params['max_norm']}")
-    print(f"normalize   : {params['target_normalize']}")
-    print(f"remove_hs   : {params['remove_hs']}")
-    print(f"GPU/AMP     : {params['use_gpu']}/{params['use_amp']}")
-    if not args.no_save:
-        print(f"Save to     : {OUTPUT_DIR}/step1/{args.dataset}/seed_{split_seed}/{timestamp}/")
+    print_header(args, params, dataset_info, out_dir)
 
-    # Load data
-    train_df, valid_df, test_df = load_split(args.dataset, split_seed)
-    print(f"\nData -- Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
+    train_df, valid_df, test_df = load_split(args.dataset, params['split_seed'])
+    print(f'\nData -- Train: {len(train_df)}, '
+          f'Valid: {len(valid_df)}, Test: {len(test_df)}')
 
-    # Clean logs
     set_clean_log_format()
+    trainer = Step1Trainer(params=params, dataset_info=dataset_info,
+                           experiment_name=experiment_name)
 
-    # Experiment path: experiments/step1/{dataset}/seed_{X}/{timestamp}
-    experiment_name = f"step1/{args.dataset}/seed_{split_seed}/{timestamp}"
-    trainer = Step1Trainer(
-        params=params, dataset_info=dataset_info, experiment_name=experiment_name,
-    )
-
-    with Timer(f"Training {args.dataset} (split_seed={split_seed})"):
+    with Timer(f"Training {args.dataset} (split_seed={params['split_seed']})"):
         results = trainer.run(train_df, valid_df, test_df)
 
-    if results is None:
-        sys.exit(1)
+    results.update({
+        'split_seed': params['split_seed'],
+        'train_seed': params['random_seed'],
+        'timestamp': timestamp,
+        'params': params,
+    })
 
-    results['split_seed'] = split_seed
-    results['train_seed'] = params['random_seed']
-    results['timestamp'] = timestamp
-    results['params'] = params
-
-    if not args.no_save:
-        out_dir = os.path.join(OUTPUT_DIR, 'step1', args.dataset,
-                               f"seed_{split_seed}", timestamp)
+    if out_dir is not None:
         os.makedirs(out_dir, exist_ok=True)
-        save_json(results, os.path.join(out_dir, 'results.json'))
-        print(f"Results saved -- {out_dir}/results.json")
+        results_path = os.path.join(out_dir, 'results.json')
+        save_json(results, results_path)
+        print(f'Results saved -- {results_path}')
     else:
-        print("(--no-save: results not saved)")
+        print('(--no-save: results not saved)')
 
-    print(f"End: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f'End: {datetime.now():%Y-%m-%d %H:%M:%S}')
+    return 0
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    sys.exit(main())
