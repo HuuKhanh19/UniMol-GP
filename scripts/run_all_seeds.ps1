@@ -43,8 +43,12 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
 $seedList = $Seeds.Split(',') | ForEach-Object { [int]$_.Trim() }
-$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$LogDir = Join-Path $LogDir $stamp
+# An explicit -LogDir is used verbatim, so the log paths are predictable enough
+# to tail by name. The default gets a timestamp so successive sweeps don't
+# overwrite each other.
+if (-not $PSBoundParameters.ContainsKey('LogDir')) {
+    $LogDir = Join-Path $LogDir (Get-Date -Format 'yyyyMMdd_HHmmss')
+}
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $summaryPath = Join-Path $LogDir 'sweep.log'
 
@@ -94,7 +98,9 @@ foreach ($job in $plan) {
 if (-not $SkipSelfTest) {
     Write-Log 'running self-test'
     $selfTestLog = Join-Path $LogDir 'selftest.log'
-    python -u scripts/selftest.py *>&1 | Tee-Object -FilePath $selfTestLog
+    # Out-File, not Tee-Object: under -WindowStyle Hidden there is no console
+    # for Tee to mirror to, and that is a good way to stall a detached sweep.
+    python -u scripts/selftest.py *>&1 | Out-File -FilePath $selfTestLog -Encoding utf8
     if ($LASTEXITCODE -ne 0) {
         Write-Log "self-test FAILED (see $selfTestLog) - aborting before any training"
         exit 1
