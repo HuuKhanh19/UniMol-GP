@@ -12,11 +12,27 @@ experiments/             training runs + results.json (not tracked)
 scripts/
   preprocess_data.py     raw CSV -> cleaned + scaffold split -> data/processed/
   run_step1.py           UniMol v1 fine-tuning + evaluation
+  run_step2.py           symbolic GP head + EGGROLL fine-tuning
+  selftest.py            correctness checks -- run before any step-2 training
 src/
   data/datasets.py       dataset registry and project constants
   data/splitters.py      Bemis-Murcko scaffold split
   data/data_loader.py    load / clean / split pipeline
   models/unimol_wrapper.py   MolTrain + MolPredict wrapper, Step1Trainer
+  head/                  symbolic head: postfix trees, GP, ridge merge
+    ops.py               protected operator set and opcodes
+    genome.py            postfix genome, init, crossover, mutation
+    evaluator.py         batched lock-step tree evaluation
+    ridge.py             batched ridge + scaffold-grouped CV scoring
+    gp.py                cooperative coevolution over k islands
+    gp_head.py           GPHead container, regions, linear probe
+  es/                    EGGROLL: low-rank evolution strategies
+    forward_unimol.py    frozen prefix / perturbed suffix split
+    perturb.py           antithetic low-rank sampling, aggregation, Adam
+    shaping.py           fitness shaping
+    data.py              featurisation, length tiling, scaffold folds
+    eggroll.py           the ES step
+  train/stage2.py        ES <-> GP alternation
   utils/helpers.py       timer, JSON I/O, console output
 unimol_source/           PATCHED fork of Uni-Mol tools (see note below)
 ```
@@ -96,6 +112,105 @@ unimol_tools resolves to:
 but this repo ships its own patched fork at:
     C:\...\DrugOptimization\UniMol-GP\unimol_source
 ```
+
+## Step 2 — symbolic head + EGGROLL
+
+Step 2 replaces UniMol's head with **k formula trees over disjoint regions of the
+512-d CLS embedding, merged by ridge**, and fine-tunes the last transformer
+blocks with **low-rank evolution strategies** (EGGROLL) instead of gradient
+descent.
+
+```bash
+# always run this first -- it verifies the rewritten forward pass
+python scripts/selftest.py
+
+python scripts/run_step2.py --dataset esol --split-seed 0 \
+    --init-checkpoint experiments/step1/esol/seed_0/<timestamp>/model_0.pth
+```
+
+For a full sweep, `scripts/run_all_seeds.ps1` runs one seed after another,
+resolving each seed's Step 1 checkpoint itself and writing one log per seed. It
+verifies the self-test, every processed split and every checkpoint *before* the
+first run starts, so a missing file fails in the first minute rather than after
+hours of GPU time, and it prints a per-seed valid/test summary at the end:
+
+```powershell
+.\scripts\run_all_seeds.ps1                                # 5 seeds, GPU 0
+.\scripts\run_all_seeds.ps1 -Seeds '0,2,4' -GpuId 0        # split across both
+.\scripts\run_all_seeds.ps1 -Seeds '1,3'   -GpuId 1        #   GPUs, run twice
+```
+
+A seed with no Step 1 checkpoint is skipped rather than quietly started from the
+pretrained weights -- that is a different, much harder experiment and its numbers
+must not be averaged in with the rest.
+
+Note that UniMol v1's stock head is `LinearHead` — `Dropout -> Linear(512, 1)`,
+513 parameters ([`unimol.py`](unimol_source/unimol_tools/models/unimol.py)) —
+not an MLP. Step 2 replaces a *linear* map, so the headroom on a frozen
+embedding is small by construction; the hypothesis being tested is that ES
+co-adaptation of the backbone to a symbolic head beats co-adaptation to a linear
+one.
+
+### Structure
+
+```
+z = CLS(512)  ->  16 regions of 32 dims  ->  T_1..T_16   ->  ridge  ->  y
+                                             (GP)          + linear probe
+                        backbone: EGGROLL over the last 4 blocks
+```
+
+Three parameter groups, three mechanisms, alternated rather than nested:
+
+| | search space | optimiser |
+|---|---|---|
+| backbone (last L blocks) | ~12.6M continuous | EGGROLL |
+| tree structures | discrete | cooperative-coevolutionary GP |
+| merge weights | k + 2 | ridge, closed form |
+
+GP is **not** run inside the ES fitness. That would make fitness a stochastic
+function of the backbone — two nearby parameter vectors could yield different
+trees — which destroys the local continuity ES needs, quite apart from costing N
+GP runs per step. Instead the trees are fixed and shared across the whole
+population within an ES step (common random numbers), and the GP phase
+warm-starts from the previous population so the head drifts rather than jumps.
+
+### Fitness
+
+**Scaffold-grouped 5-fold CV inside the training split**, for both GP and ES.
+With ~900 molecules and 512 features on tap, training error would be optimised
+into meaninglessness. The valid split is reserved for phase-level early stopping
+only; test is untouched until the end.
+
+Ridge is solved exactly for every candidate rather than searched — variable
+projection. This removes k+2 nuisance dimensions from both searches and makes
+fitness invariant to rescaling of the tree outputs.
+
+### Why no GPU genetic-programming library
+
+Embeddings are cached per phase, so a GP generation is ~600 kernel launches on
+`(P, n)` tensors — a few milliseconds, well under 3% of the step budget, which a
+CUDA GP library would not meaningfully improve. The fitness here (batched ridge
+with grouped CV under cooperative coevolution) also does not map onto the fused
+fitness kernels such libraries provide. `src/head/evaluator.py` is a tensorised
+postfix interpreter in plain torch: same idea, no build dependency, full control.
+
+### Knobs that matter
+
+| flag | why |
+|---|---|
+| `--rank` | keep `es_pop * rank > 512`, or the aggregate ES update is rank-deficient. The EGGROLL paper's r=1 results all satisfy this via large N. |
+| `--es-chunk`, `--mol-tile` | attention memory is `~3 * chunk * tile * heads * S^2`; these are the VRAM knobs. The run prints the estimate against the real longest molecule. |
+| `--sigma` | relative to each matrix's Frobenius norm, so one value works across 512x512 and 512x2048. |
+| `--init-checkpoint` | start the ES mean from a fine-tuned step-1 model. Starting from pretrained weights is a much harder problem. |
+| `--probe-penalty-scale` | the linear probe is a safety net that guarantees the head can reproduce the linear baseline; raise this if `share_trees` in the logs shows the trees going vestigial. |
+| `--region-mask` | confine each perturbation column to one head region, so ES asks "which region should change". |
+
+### Multi-GPU
+
+There is no distributed code. With 15 runs to do (5 splits x 3 seeds), running
+two independent runs concurrently with `--gpu-id 0` and `--gpu-id 1` beats
+splitting one run's population: no sync, no NCCL (unavailable on Windows), same
+throughput on the sweep.
 
 ## Split
 
