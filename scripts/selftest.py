@@ -215,7 +215,8 @@ def check_split(device: str = 'cuda', n_mol: int = 6) -> None:
     torch.manual_seed(0)
     model = UniMolModel(output_dim=1, data_type='molecule', remove_hs=False)
     model = model.to(device).eval()
-    inputs = ConformerGen(remove_hs=False).transform(smiles)
+    # transform() returns (features, mols) -- see DataHub._init_data.
+    inputs, _ = ConformerGen(remove_hs=False).transform(smiles)
     batch, _ = model.batch_collate_fn([(d, 0.0) for d in inputs])
     batch = {k: v.to(device) for k, v in batch.items()}
 

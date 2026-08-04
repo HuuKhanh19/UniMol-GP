@@ -42,7 +42,9 @@ class MoleculeData:
         self.smiles = list(smiles)
         self.model = model
         self.raw = np.asarray(targets, dtype=np.float64)
-        self.inputs = ConformerGen(remove_hs=remove_hs, seed=seed).transform(self.smiles)
+        # transform() returns (features, mols); only the features are needed.
+        self.inputs, _ = ConformerGen(
+            remove_hs=remove_hs, seed=seed).transform(self.smiles)
         self.n_atoms = np.array([len(d['src_tokens']) for d in self.inputs])
 
         self.y_mean = float(self.raw.mean())
