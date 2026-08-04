@@ -73,7 +73,6 @@ class UniMolWrapper:
         )
 
         # Pass remaining hypers via config
-        trainer.config.n_confomer = p.get('n_confomer', 1)
         trainer.config.warmup_ratio = p.get('warmup_ratio', 0.03)
         trainer.config.seed = p.get('random_seed', 42)
 

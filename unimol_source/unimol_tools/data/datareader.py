@@ -24,7 +24,6 @@ class MolDataReader(object):
         # 1. add anomaly detection & outlier removal.
         # 2. add support for other file format.
         # 3. add support for multi tasks.
-        # print("type(data) =", type(data))
 
         """
         Reads and preprocesses molecular data from various input formats for model training or prediction.
@@ -54,6 +53,7 @@ class MolDataReader(object):
             if data.endswith('.sdf'):
                 # load sdf file
                 data = PandasTools.LoadSDF(data)
+                data = self._convert_numeric_columns(data)
             elif data.endswith('.csv'):
                 data = pd.read_csv(self.data_path)
             else:
@@ -227,3 +227,24 @@ class MolDataReader(object):
             'Anomaly clean with 3 sigma threshold: {} -> {}'.format(sz, data.shape[0])
         )
         return data
+
+    def _convert_numeric_columns(self, df):
+        """
+        Try to convert all columns in the DataFrame to numeric types, except for the 'ROMol' column.
+        
+        :param df: DataFrame to be converted.
+        :return: DataFrame with numeric columns.
+        """
+        for col in df.columns:
+            if col == 'ROMol': 
+                continue
+                
+            try:
+                numeric_series = pd.to_numeric(df[col], errors='coerce')
+                if numeric_series.isna().sum() / len(df) < 0.1:  # Allow up to 10% NaN values
+                    df[col] = numeric_series
+                    logger.debug(f"Column '{col}' converted to numeric type")
+            except:
+                pass
+                
+        return df

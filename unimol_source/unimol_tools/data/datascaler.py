@@ -36,8 +36,8 @@ class TargetScaler(object):
         :param task: (str) The type of machine learning task (e.g., 'classification', 'regression').
         :param load_dir: (str, optional) Directory from which to load an existing scaler.
         """
-        self.ss_method = ss_method # none
-        self.task = task # ref
+        self.ss_method = ss_method
+        self.task = task
         if load_dir and os.path.exists(os.path.join(load_dir, 'target_scaler.ss')):
             self.scaler = joblib.load(os.path.join(load_dir, 'target_scaler.ss'))
         else:

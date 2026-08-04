@@ -28,7 +28,6 @@ DEFAULTS = {
     # Shared
     'split_seed':       0,
     'random_seed':      42,
-    'n_confomer':       1,
     'gpu_id':           0,
     # Step 1 tunable (config.yaml)
     'epochs':           100,
@@ -48,7 +47,7 @@ DEFAULTS = {
 # This project targets UniMol v1 only.
 MODEL_NAME = 'unimolv1'
 
-CONFIG_KEYS = {'split_seed', 'n_confomer', 'gpu_id',
+CONFIG_KEYS = {'split_seed', 'gpu_id',
                'epochs', 'batch_size', 'learning_rate', 'patience'}
 
 
@@ -102,7 +101,6 @@ def main():
     parser.add_argument('--dataset', type=str, required=True, choices=DATASET_NAMES)
     # Shared
     parser.add_argument('--split-seed',    type=int,   default=None)
-    parser.add_argument('--n-confomer',    type=int,   default=None)
     parser.add_argument('--gpu-id',        type=int,   default=None)
     # Step 1 tunable
     parser.add_argument('--epochs',        type=int,   default=None)
@@ -142,7 +140,6 @@ def main():
     print(f"model       : {params['model_name']}")
     print(f"split_seed  : {split_seed}")
     print(f"random_seed : {params['random_seed']}")
-    print(f"n_confomer  : {params['n_confomer']}")
     print(f"gpu_id      : {params['gpu_id']}")
     print(f"epochs      : {params['epochs']}")
     print(f"batch_size  : {params['batch_size']}")

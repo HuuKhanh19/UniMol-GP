@@ -76,9 +76,23 @@ This is intentional — do not "fix" it to 80/10/10.
 
 ## Note on `unimol_source/`
 
-This is a **patched** fork of [Uni-Mol tools](https://github.com/deepmodeling/Uni-Mol),
-not a pristine copy. Do not overwrite it with upstream:
+This is [Uni-Mol tools](https://github.com/deepmodeling/Uni-Mol) **0.1.4,
+byte-identical to upstream except for one additive patch**, so the model,
+featurisation and training loop are stock UniMol v1.
 
-- `MolTrain.fit()` honours an external `VALID` column (0 = train, 1 = valid), so
-  the scaffold split from step 1 is used verbatim instead of an internal split.
-- k-fold cross-validation has been removed; runs are always single-fold.
+The single deviation is `MolTrain._override_split_with_valid_column()` in
+`unimol_tools/train.py` (~35 added lines): if the input CSV carries a `VALID`
+column (0 = train, 1 = valid), it replaces `split_nfolds` with that one fold so
+the scaffold split from `preprocess_data.py` is used verbatim. Without a `VALID`
+column it is a no-op. Nothing else — no k-fold removal, no featurisation change.
+
+To verify the fork is still clean:
+
+```bash
+pip download unimol_tools==0.1.4 --no-deps --no-binary :all: -d /tmp/um
+tar xzf /tmp/um/unimol_tools-0.1.4.tar.gz -C /tmp/um
+diff -r /tmp/um/unimol_tools-0.1.4/unimol_tools unimol_source/unimol_tools
+```
+
+Only `train.py` should differ (plus `config/default.yaml` and
+`weights/mol.dict.txt`, which the sdist does not ship).

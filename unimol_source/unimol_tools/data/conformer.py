@@ -23,6 +23,7 @@ from ..config import MODEL_CONFIG
 from ..utils import logger
 from ..weights import WEIGHT_DIR, weight_download
 from .dictionary import Dictionary
+
 # https://github.com/snap-stanford/ogb/blob/master/ogb/utils/features.py
 # allowable multiple choice node and edge features
 allowable_features = {
@@ -57,13 +58,11 @@ allowable_features = {
 
 
 class ConformerGen(object):
-    
     '''
     This class designed to generate conformers for molecules represented as SMILES strings using provided parameters and configurations. The `transform` method uses multiprocessing to speed up the conformer generation process.
     '''
 
     def __init__(self, **params):
-
         """
         Initializes the neural network model based on the provided model name and parameters.
 
@@ -73,7 +72,6 @@ class ConformerGen(object):
         :return: An instance of the specified neural network model.
         :raises ValueError: If the model name is not recognized.
         """
-        self.fl=1
         self._init_features(**params)
 
     def _init_features(self, **params):
@@ -90,7 +88,6 @@ class ConformerGen(object):
         self.method = params.get('method', 'rdkit_random')
         self.mode = params.get('mode', 'fast')
         self.remove_hs = params.get('remove_hs', False)
-        self.n_confomer = params.get('n_confomer', 10)
         if self.data_type == 'molecule':
             name = "no_h" if self.remove_hs else "all_h"
             name = self.data_type + '_' + name
@@ -111,7 +108,6 @@ class ConformerGen(object):
                 )
 
     def single_process(self, smiles):
-    
         """
         Processes a single SMILES string to generate conformers using the specified method.
 
@@ -120,29 +116,17 @@ class ConformerGen(object):
         :raises ValueError: If the conformer generation method is unrecognized.
         """
         if self.method == 'rdkit_random':
-            atoms, coordinates, energies  = inner_smi2coords(
-                smiles, seed=self.seed, mode=self.mode, n_confs=self.n_confomer,return_energy=True
+            atoms, coordinates, mol = inner_smi2coords(
+                smiles, seed=self.seed, mode=self.mode, remove_hs=self.remove_hs
             )
-            # print(1)
-            # print(atoms, coordinates)
-
-
             feat = coords2unimol(
                 atoms,
                 coordinates,
                 self.dictionary,
                 self.max_atoms,
                 remove_hs=self.remove_hs,
-                seed=self.seed
             )
-            # print(2)
-            for i in range(min(len(feat), len(energies))):
-                feat[i]['energy'] = float(energies[i])
-
-            # nếu thiếu conformer vì fail, vẫn an toàn
-            for i in range(len(energies), len(feat)):
-                feat[i]['energy'] = float('inf')
-            return feat
+            return feat, mol
         else:
             raise ValueError(
                 'Unknown conformer generation method: {}'.format(self.method)
@@ -159,7 +143,6 @@ class ConformerGen(object):
                     self.dictionary,
                     self.max_atoms,
                     remove_hs=self.remove_hs,
-                    seed=self.seed
                 )
             )
         return inputs
@@ -184,13 +167,16 @@ class ConformerGen(object):
         logger.info('Start generating conformers...')
         if self.multi_process:
             pool = Pool(processes=min(8, os.cpu_count()))
-            results = [item for item in tqdm(pool.imap(self.single_process, smiles_list))]
+            results = [
+                item for item in tqdm(pool.imap(self.single_process, smiles_list))
+            ]
             pool.close()
         else:
             results = [self.single_process(smiles) for smiles in tqdm(smiles_list)]
 
-        inputs = [feat for sublist in results for feat in sublist]
-        mols = None
+        inputs, mols = zip(*results)
+        inputs = list(inputs)
+        mols = list(mols)
 
         failed_conf = [(item['src_coord'] == 0.0).all() for item in inputs]
         logger.info(
@@ -198,13 +184,16 @@ class ConformerGen(object):
                 (1 - np.mean(failed_conf)) * 100
             )
         )
-
-        k = self.n_confomer
-        failed_conf_indices = [i for i, v in enumerate(failed_conf) if v]
+        failed_conf_indices = [
+            index for index, value in enumerate(failed_conf) if value
+        ]
         if len(failed_conf_indices) > 0:
-            failed_mol_idx = sorted(set(i // k for i in failed_conf_indices))
-            logger.info('Failed conformers indices: {}'.format(failed_conf_indices[:50]))
-            logger.debug('Failed conformers SMILES: {}'.format([smiles_list[i] for i in failed_mol_idx[:50]]))
+            logger.info('Failed conformers indices: {}'.format(failed_conf_indices))
+            logger.debug(
+                'Failed conformers SMILES: {}'.format(
+                    [smiles_list[index] for index in failed_conf_indices]
+                )
+            )
 
         failed_conf_3d = [(item['src_coord'][:, 2] == 0.0).all() for item in inputs]
         logger.info(
@@ -212,175 +201,83 @@ class ConformerGen(object):
                 (1 - np.mean(failed_conf_3d)) * 100
             )
         )
-
-        failed_conf_3d_indices = [i for i, v in enumerate(failed_conf_3d) if v]
+        failed_conf_3d_indices = [
+            index for index, value in enumerate(failed_conf_3d) if value
+        ]
         if len(failed_conf_3d_indices) > 0:
-            failed_mol_idx_3d = sorted(set(i // k for i in failed_conf_3d_indices))
-            logger.info('Failed 3d conformers indices: {}'.format(failed_conf_3d_indices[:50]))
-            logger.debug('Failed 3d conformers SMILES: {}'.format([smiles_list[i] for i in failed_mol_idx_3d[:50]]))
-
+            logger.info(
+                'Failed 3d conformers indices: {}'.format(failed_conf_3d_indices)
+            )
+            logger.debug(
+                'Failed 3d conformers SMILES: {}'.format(
+                    [smiles_list[index] for index in failed_conf_3d_indices]
+                )
+            )
         return inputs, mols
 
-def _minimize_energy(mol, conf_id=0):
-    """Try MMFF, else UFF. Returns energy (float) or np.inf if fails."""
+
+def inner_smi2coords(smi, seed=42, mode='fast', remove_hs=True, return_mol=False):
+    '''
+    This function is responsible for converting a SMILES (Simplified Molecular Input Line Entry System) string into 3D coordinates for each atom in the molecule. It also allows for the generation of 2D coordinates if 3D conformation generation fails, and optionally removes hydrogen atoms and their coordinates from the resulting data.
+
+    :param smi: (str) The SMILES representation of the molecule.
+    :param seed: (int, optional) The random seed for conformation generation. Defaults to 42.
+    :param mode: (str, optional) The mode of conformation generation, 'fast' for quick generation, 'heavy' for more attempts. Defaults to 'fast'.
+    :param remove_hs: (bool, optional) Whether to remove hydrogen atoms from the final coordinates. Defaults to True.
+
+    :return: A tuple containing the list of atom symbols and their corresponding 3D coordinates.
+    :raises AssertionError: If no atoms are present in the molecule or if the coordinates do not align with the atom count.
+    '''
+    mol = Chem.MolFromSmiles(smi)
+    mol = AllChem.AddHs(mol)
+    atoms = [atom.GetSymbol() for atom in mol.GetAtoms()]
+    assert len(atoms) > 0, 'No atoms in molecule: {}'.format(smi)
     try:
-        if AllChem.MMFFHasAllMoleculeParams(mol):
-            mp = AllChem.MMFFGetMoleculeProperties(mol)
-            ff = AllChem.MMFFGetMoleculeForceField(mol, mp, confId=conf_id)
-        else:
-            ff = AllChem.UFFGetMoleculeForceField(mol, confId=conf_id)
-        if ff is None:
-            return np.inf
-        ff.Minimize()
-        return float(ff.CalcEnergy())
-    except Exception:
-        return np.inf
-
-def inner_smi2coords(
-    smi, seed=42, mode='fast', optimize=True, n_confs=3, prune_conf=False, return_2d=False, return_energy=False
-):
-    """
-    Robust SMILES->3D coords:
-    - Replace '*' (dummy) atoms with H in a working copy for embedding
-    - ETKDGv3 with retries (random coords, multi-conformer)
-    - MMFF/UFF minimization, 2D fallback
-    - Remove original '*' atoms from the final output (regardless of remove_hs)
-    - Optionally remove hydrogens from the final output
-    """
-    # Parse SMILES (try to be robust with '*')
-    
-    coords = None
-    conf_ids = []
-    
-    # Prepare ETKDGv3 params
-    def _embed_with_params(m, n_confs=1, use_random=False, max_attempts=200, pruneRmsThresh=0.5):
-        ps = AllChem.ETKDGv3()
-        ps.randomSeed = seed
-        ps.useRandomCoords = bool(use_random)
-        ps.maxAttempts = int(max_attempts)
-        ps.numThreads = 0 
-        # check this code
-        if prune_conf:
-            ps.pruneRmsThresh = float(pruneRmsThresh)
-        return list(AllChem.EmbedMultipleConfs(m, numConfs=int(n_confs), params=ps))
-    try:
-        work_mol_no_H = Chem.MolFromSmiles(smi)
-        work_mol = AllChem.AddHs(work_mol_no_H)
-    except Exception as e:
-        print(f"An error with smi {smi}, {e}")
-        return [None], [None]
-    if work_mol is None:
-        return [None], [None]
-    
-    if len(work_mol.GetAtoms()) > 400 or return_2d:
-        print("large")
-        # return 2D coords for very large molecules
-        orig_atoms = [a.GetSymbol() for a in work_mol.GetAtoms()]
-        keep_idx = [i for i, sym in enumerate(orig_atoms) if sym != '*']
-        atoms = [sym for sym in orig_atoms if sym != '*']
-        try:
-            AllChem.Compute2DCoords(work_mol)
-            conf = work_mol.GetConformer()
-            coords2d = conf.GetPositions().astype(np.float32)
-            coords = coords2d  # (N,3) with z=0
-            
-        except Exception:
-            # Final fallback: zeros
-            coords = np.zeros((work_mol.GetNumAtoms(), 3), dtype=np.float32)
-        
-        coordinates = coords[keep_idx]
-        assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
-        return [atoms], [coordinates]
-        
-
-    # 1) quick single conformer
-    conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=False, max_attempts=200)
-    # print(f'Generated {len(conf_ids)} conformers for SMILES: {smi}')
-
-    # 2) few conformers, same seed
-    if len(conf_ids) == 0 and mode in ('heavy', 'fast'):
-        conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=False, max_attempts=500)
-    # 3) random coords fallback
-    if len(conf_ids) == 0 and mode in ('heavy', 'fast'):
-        conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=False,  max_attempts=800)
-    # 4) random coords fallback
-    if len(conf_ids) == 0 and mode in ('heavy', 'fast'):
-        conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=True,  max_attempts=1000)
-    # 5) random coords fallback, heavy mode only
-    if len(conf_ids) == 0 and mode == 'heavy':
-        conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=False, max_attempts=2000)
-    # 6) random coords fallback, heavy mode only
-    if len(conf_ids) == 0 and mode == 'heavy':
-        conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=True, max_attempts=5000)
-
-  
-    all_confs_coords = []
-    all_energies = []
-    
-    # Build atom symbols from ORIGINAL molecule (before capping),
-    # so we know which were '*' and can drop them deterministically.
-    orig_atoms = [a.GetSymbol() for a in work_mol.GetAtoms()]
-    keep_idx = [i for i, sym in enumerate(orig_atoms) if sym != '*']
-    atoms = [sym for sym in orig_atoms if sym != '*']
-    
-    
-    for cid in conf_ids:
-        coords = None
-        e = np.inf
-        if optimize:
-            e = _minimize_energy(work_mol, conf_id=cid)
-        try:
-            conf = work_mol.GetConformer(int(cid))
-            coords = conf.GetPositions().astype(np.float32)
-        except Exception:
-            coords = None
-
-        # Fallback: 2D coords (Z=0)
-        if coords is None:
+        # will random generate conformer with seed equal to -1. else fixed random seed.
+        res = AllChem.EmbedMolecule(mol, randomSeed=seed)
+        if res == 0:
             try:
-                AllChem.Compute2DCoords(work_mol)
-                conf = work_mol.GetConformer()
-                coords2d = conf.GetPositions().astype(np.float32)
-                coords = coords2d  # (N,3) with z=0
-            except Exception:
-                # Final fallback: zeros
-                coords = np.zeros((work_mol.GetNumAtoms(), 3), dtype=np.float32)
-        
-        if coords.shape[0] < len(orig_atoms):
-            # This shouldn’t happen with AddHs-before-embed; guard anyway.
-            # pad = np.zeros((len(orig_atoms) - coords.shape[0], 3), dtype=np.float32)
-            # coords = np.vstack([coords, pad])
-            continue
-                
+                # some conformer can not use MMFF optimize
+                AllChem.MMFFOptimizeMolecule(mol)
+                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+            except:
+                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+        ## for fast test... ignore this ###
+        elif res == -1 and mode == 'heavy':
+            AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
+            try:
+                # some conformer can not use MMFF optimize
+                AllChem.MMFFOptimizeMolecule(mol)
+                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+            except:
+                AllChem.Compute2DCoords(mol)
+                coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
+                coordinates = coordinates_2d
+        else:
+            AllChem.Compute2DCoords(mol)
+            coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
+            coordinates = coordinates_2d
+    except:
+        print("Failed to generate conformer, replace with zeros.")
+        coordinates = np.zeros((len(atoms), 3))
 
-        all_confs_coords.append(coords)
-        all_energies.append(e)
+    if return_mol:
+        return mol  # for unimolv2
 
-    if len(all_confs_coords) == 0:
-        # Final fallback: zeros
-        coords = np.zeros((work_mol.GetNumAtoms(), 3), dtype=np.float32)
-        all_confs_coords.append(coords)
-        all_energies.append(np.inf)
-    
-    
-    # Make sure shape matches: coordinates array should be at least the original core atoms count.
-    all_confs_coords_new = []
-    all_energies_new = []
-    for coords, e in zip(all_confs_coords, all_energies):
-        coordinates = coords[keep_idx]
-        assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
-        all_confs_coords_new.append(coordinates)
-        all_energies_new.append(e)
-    
-    assert len(atoms) == len(all_confs_coords_new[0]), "coordinates shape is not align with {}".format(smi)
-    if return_energy:
-        # (optional) đổi sang ΔE theo molecule để dùng weighting ổn hơn
-        arr = np.array(all_energies_new, dtype=float)
-        if np.isfinite(arr).any():
-            arr = arr - np.nanmin(arr)
-        return [atoms], all_confs_coords_new, arr.tolist()
+    assert len(atoms) == len(
+        coordinates
+    ), "coordinates shape is not align with {}".format(smi)
+    if remove_hs:
+        idx = [i for i, atom in enumerate(atoms) if atom != 'H']
+        atoms_no_h = [atom for atom in atoms if atom != 'H']
+        coordinates_no_h = coordinates[idx]
+        assert len(atoms_no_h) == len(
+            coordinates_no_h
+        ), "coordinates shape is not align with {}".format(smi)
+        return atoms_no_h, coordinates_no_h, mol
+    else:
+        return atoms, coordinates, mol
 
-    return [atoms], all_confs_coords_new
 
 def inner_coords(atoms, coordinates, remove_hs=True):
     """
@@ -412,87 +309,51 @@ def inner_coords(atoms, coordinates, remove_hs=True):
 
 
 def coords2unimol(
-    atoms,
-    coordinates_list,
-    dictionary,
-    max_atoms=256,
-    remove_hs=True,
-    seed=42,
-    **params
+    atoms, coordinates, dictionary, max_atoms=256, remove_hs=True, **params
 ):
     """
-    Supports single or multiple conformers.
-    coordinates:
-        - (N, 3)
-        - (K, N, 3)
+    Converts atom symbols and coordinates into a unified molecular representation.
+
+    :param atoms: (list) List of atom symbols.
+    :param coordinates: (ndarray) Array of atomic coordinates.
+    :param dictionary: (Dictionary) An object that maps atom symbols to unique integers.
+    :param max_atoms: (int) The maximum number of atoms to consider for the molecule.
+    :param remove_hs: (bool) Whether to remove hydrogen atoms from the representation.
+    :param params: Additional parameters.
+
+    :return: A dictionary containing the molecular representation with tokens, distances, coordinates, and edge types.
     """
-    # print(atoms[0])
-    if atoms[0] is None or coordinates_list[0] is None:
-        print(atoms[0], coordinates_list[0])
-        return [{
-            'src_tokens': np.zeros((max_atoms + 2,), dtype=int),
-            'src_distance': np.zeros((max_atoms + 2, max_atoms + 2), dtype=np.float32),
-            'src_coord': np.zeros((max_atoms + 2, 3), dtype=np.float32),
-            'src_edge_type': np.zeros((max_atoms + 2, max_atoms + 2), dtype=int),
-        }]
-    atoms_org = atoms[0]
-
-    outputs = []
-    idx = None 
-
-    for coordinates in coordinates_list:
-
-        # ---- single conformer ----
-        atoms, coordinates = inner_coords(atoms_org, coordinates, remove_hs=remove_hs)
-
-        if idx is None:
-            # cropping
-            if len(atoms) > max_atoms:
-                rng = np.random.default_rng(seed=seed)
-
-                idx = rng.choice(len(atoms), size=max_atoms, replace=False)
-                idx = np.sort(idx)
-            else:
-                idx = np.arange(len(atoms))
-
-        atoms = np.array(atoms)[idx]
-
+    atoms, coordinates = inner_coords(atoms, coordinates, remove_hs=remove_hs)
+    atoms = np.array(atoms)
+    coordinates = np.array(coordinates).astype(np.float32)
+    # cropping atoms and coordinates
+    if len(atoms) > max_atoms:
+        idx = np.random.choice(len(atoms), max_atoms, replace=False)
+        atoms = atoms[idx]
         coordinates = coordinates[idx]
+    # tokens padding
+    src_tokens = np.array(
+        [dictionary.bos()]
+        + [dictionary.index(atom) for atom in atoms]
+        + [dictionary.eos()]
+    )
+    src_distance = np.zeros((len(src_tokens), len(src_tokens)))
+    # coordinates normalize & padding
+    src_coord = coordinates - coordinates.mean(axis=0)
+    src_coord = np.concatenate([np.zeros((1, 3)), src_coord, np.zeros((1, 3))], axis=0)
+    # distance matrix
+    src_distance = distance_matrix(src_coord, src_coord)
+    # edge type
+    src_edge_type = src_tokens.reshape(-1, 1) * len(dictionary) + src_tokens.reshape(
+        1, -1
+    )
 
-        coordinates = np.array(coordinates, dtype=np.float32)
-
-        # tokens
-        src_tokens = np.array(
-            [dictionary.bos()]
-            + [dictionary.index(atom) for atom in atoms]
-            + [dictionary.eos()]
-        )
-
-        # normalize coords
-        src_coord = coordinates - coordinates.mean(axis=0)
-        src_coord = np.concatenate(
-            [np.zeros((1, 3)), src_coord, np.zeros((1, 3))],
-            axis=0
-        )
-
-        # distance matrix
-        src_distance = distance_matrix(src_coord, src_coord)
-
-        # edge type
-        src_edge_type = (
-            src_tokens.reshape(-1, 1) * len(dictionary)
-            + src_tokens.reshape(1, -1)
-        )
-
-        outputs.append({ 
-            'src_tokens': src_tokens.astype(int),
-            'src_distance': src_distance.astype(np.float32),
-            'src_coord': src_coord.astype(np.float32),
-            'src_edge_type': src_edge_type.astype(int),
-        })
-
-
-    return outputs
+    return {
+        'src_tokens': src_tokens.astype(int),
+        'src_distance': src_distance.astype(np.float32),
+        'src_coord': src_coord.astype(np.float32),
+        'src_edge_type': src_edge_type.astype(int),
+    }
 
 
 class UniMolV2Feature(object):
@@ -551,7 +412,7 @@ class UniMolV2Feature(object):
                 remove_hs=self.remove_hs,
                 return_mol=True,
             )
-            feat = mol2unimolv2(mol, self.max_atoms, remove_hs=self.remove_hs, seed=self.seed)
+            feat = mol2unimolv2(mol, self.max_atoms, remove_hs=self.remove_hs)
             return feat, mol
         else:
             raise ValueError(
@@ -650,7 +511,7 @@ def create_mol_from_atoms_and_coords(atoms, coordinates):
     return mol
 
 
-def mol2unimolv2(mol, max_atoms=128, remove_hs=True, seed=42, **params):
+def mol2unimolv2(mol, max_atoms=128, remove_hs=True, **params):
     """
     Converts atom symbols and coordinates into a unified molecular representation.
 
@@ -668,7 +529,6 @@ def mol2unimolv2(mol, max_atoms=128, remove_hs=True, seed=42, **params):
 
     # cropping atoms and coordinates
     if len(atoms) > max_atoms:
-        np.random.seed(seed)
         mask = np.zeros(len(atoms), dtype=bool)
         mask[:max_atoms] = True
         np.random.shuffle(mask)  # shuffle the mask
@@ -870,18 +730,3 @@ def floyd_warshall(M):
             if M[i, j] >= 510:
                 M[i, j] = 510
     return M
-
-def _minimize_energy(mol, conf_id=0):
-    """Try MMFF, else UFF. Returns energy (float) or np.inf if fails."""
-    try:
-        if AllChem.MMFFHasAllMoleculeParams(mol):
-            mp = AllChem.MMFFGetMoleculeProperties(mol)
-            ff = AllChem.MMFFGetMoleculeForceField(mol, mp, confId=conf_id)
-        else:
-            ff = AllChem.UFFGetMoleculeForceField(mol, confId=conf_id)
-        if ff is None:
-            return np.inf
-        ff.Minimize()
-        return float(ff.CalcEnergy())
-    except Exception:
-        return np.inf

@@ -162,51 +162,63 @@ class MolTrain(object):
         self.save_path = save_path
         self.config = config
 
+    # --- UniMol-GP patch (the ONLY deviation from upstream unimol_tools 0.1.4) ---
+    def _override_split_with_valid_column(self, data):
+        """
+        Use an external train/valid split instead of the internal one.
+
+        If the input carries a VALID column (0 = train, 1 = valid), replace
+        ``split_nfolds`` with that single fold so the scaffold split produced by
+        scripts/preprocess_data.py is used verbatim. Without a VALID column this
+        is a no-op and upstream behaviour is unchanged.
+        """
+        raw_df = self.data.get('raw_data', None)
+        flags = None
+        if raw_df is not None and hasattr(raw_df, 'columns') and 'VALID' in raw_df.columns:
+            flags = raw_df['VALID'].values
+            source = ''
+        elif isinstance(data, str) and os.path.exists(data):
+            try:
+                flags = pd.read_csv(data, usecols=['VALID'])['VALID'].values
+                source = ' (from CSV)'
+            except (ValueError, KeyError):
+                return
+        smiles = self.data.get('smiles', None)
+        if flags is None or smiles is None or len(flags) != len(smiles):
+            return
+
+        tr_idx = np.where(flags == 0)[0]
+        te_idx = np.where(flags == 1)[0]
+        self.data['split_nfolds'] = [(tr_idx, te_idx)]
+        self.data['kfold'] = 1
+        logger.info(
+            f"Using external train/valid split{source}: "
+            f"train={len(tr_idx)}, valid={len(te_idx)}"
+        )
+
     def fit(self, data):
         """
-        Fit the model.
-        If the input CSV has a VALID column (0=train, 1=valid),
-        overrides internal split to use external train/valid split.
+        Fit the model according to the given training data with multi datasource support, including SMILES csv file and custom coordinate data.
+
+        For example: custom coordinate data.
+
+        .. code-block:: python
+
+            from unimol_tools import MolTrain
+            import numpy as np
+            custom_data ={'target':np.random.randint(2, size=100),
+                        'atoms':[['C','C','H','H','H','H'] for _ in range(100)],
+                        'coordinates':[np.random.randn(6,3) for _ in range(100)],
+                        }
+
+            clf = MolTrain()
+            clf.fit(custom_data)
         """
         self.datahub = DataHub(
             data=data, is_train=True, save_path=self.save_path, **self.config
         )
         self.data = self.datahub.data
- 
-        # --- Override split if VALID column exists ---
-        _overridden = False
-        raw_df = self.data.get('raw_data', None)
-        if raw_df is not None and hasattr(raw_df, 'columns') and 'VALID' in raw_df.columns:
-            valid_flags = raw_df['VALID'].values
-            tr_idx = np.where(valid_flags == 0)[0]
-            te_idx = np.where(valid_flags == 1)[0]
-            self.data['split_nfolds'] = [(tr_idx, te_idx)]
-            self.data['kfold'] = 1
-            _overridden = True
-            logger.info(
-                f"Using external train/valid split: "
-                f"train={len(tr_idx)}, valid={len(te_idx)}"
-            )
- 
-        if not _overridden and isinstance(data, str) and os.path.exists(data):
-            try:
-                _df = pd.read_csv(data, usecols=['VALID'])
-                valid_flags = _df['VALID'].values
-                n_smiles = len(self.data['smiles'])
-                if len(valid_flags) == n_smiles:
-                    tr_idx = np.where(valid_flags == 0)[0]
-                    te_idx = np.where(valid_flags == 1)[0]
-                    self.data['split_nfolds'] = [(tr_idx, te_idx)]
-                    self.data['kfold'] = 1
-                    _overridden = True
-                    logger.info(
-                        f"Using external train/valid split (from CSV): "
-                        f"train={len(tr_idx)}, valid={len(te_idx)}"
-                    )
-            except (ValueError, KeyError):
-                pass
-        # --- End override ---
- 
+        self._override_split_with_valid_column(data)
         self.update_and_save_config()
         self.trainer = Trainer(save_path=self.save_path, **self.config)
         self.model = NNModel(self.data, self.trainer, **self.config)
@@ -218,11 +230,11 @@ class MolTrain(object):
         if scalar is not None:
             y_pred = scalar.inverse_transform(y_pred)
             y_true = scalar.inverse_transform(y_true)
- 
+
         if self.config["task"] in ['classification', 'multilabel_classification']:
             threshold = metrics.calculate_classification_threshold(y_true, y_pred)
             joblib.dump(threshold, os.path.join(self.save_path, 'threshold.dat'))
- 
+
         self.cv_pred = y_pred
         return
 
