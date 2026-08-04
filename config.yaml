@@ -10,6 +10,11 @@
 # Data split
 split_seed: 0
 
+# Featurisation
+# false -> keep every hydrogen, load mol_pre_all_h_220816.pt  (this project)
+# true  -> strip hydrogens, load mol_pre_no_h_220816.pt
+remove_hs: false
+
 # Training
 epochs: 100
 batch_size: 32

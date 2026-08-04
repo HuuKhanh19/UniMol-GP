@@ -90,10 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     feat = parser.add_argument_group('featurisation')
     feat.add_argument('--target-normalize', default='auto',
                       help="target scaler: 'auto' or 'none'")
-    feat.add_argument('--no-remove-hs', dest='remove_hs', action='store_false',
-                      default=True,
-                      help='keep hydrogens; the pretrained checkpoint is '
-                           'no-H, so remove_hs defaults to %(default)s')
+    feat.add_argument('--remove-hs', action='store_true', default=False,
+                      help='strip hydrogens and load the no-H checkpoint; the '
+                           'default keeps every hydrogen (all_h), matching the '
+                           'unimol_tools default')
     feat.add_argument('--freeze-layers', default=None,
                       help='comma-separated encoder layers to freeze')
 
@@ -136,6 +136,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def resolve_unimol_source() -> str:
+    """Return the unimol_tools package dir, refusing anything outside this repo.
+
+    This repo ships a patched fork under unimol_source/. If the environment has
+    a different copy installed -- a second checkout, or the upstream package
+    from PyPI -- runs would silently use that instead of the code being edited
+    here, so stop rather than produce results nobody can trace back.
+    """
+    import unimol_tools
+
+    pkg_dir = os.path.dirname(os.path.abspath(unimol_tools.__file__))
+    expected = os.path.join(PROJECT_ROOT, 'unimol_source')
+    if not os.path.normcase(pkg_dir).startswith(
+            os.path.normcase(expected) + os.sep):
+        raise SystemExit(
+            f'\nunimol_tools resolves to:\n    {pkg_dir}\n'
+            f'but this repo ships its own patched fork at:\n    {expected}\n\n'
+            f'Reinstall it so runs use the code in this checkout:\n'
+            f'    pip uninstall -y unimol_tools\n'
+            f'    pip install -e "{expected}"\n')
+    return pkg_dir
+
+
+def checkpoint_name(remove_hs: bool) -> str:
+    """Pretrained file unimol_tools will load for this remove_hs setting."""
+    from unimol_tools.config import MODEL_CONFIG
+
+    key = 'molecule_no_h' if remove_hs else 'molecule_all_h'
+    return MODEL_CONFIG['weight'][key]
+
+
 def training_params(args: argparse.Namespace) -> dict[str, Any]:
     """Everything the trainer needs, keyed exactly as UniMolWrapper expects."""
     params = {k: v for k, v in vars(args).items() if k not in NON_PARAM_DESTS}
@@ -170,13 +201,16 @@ def set_clean_log_format() -> None:
 
 
 def print_header(args: argparse.Namespace, params: dict[str, Any],
-                 dataset_info: dict[str, Any], out_dir: str | None) -> None:
+                 dataset_info: dict[str, Any], out_dir: str | None,
+                 unimol_dir: str) -> None:
     print_banner('UniMol-GP -- Step 1: Baseline Training')
     rows: list[tuple[str, Any]] = [
         ('Time', f'{datetime.now():%Y-%m-%d %H:%M:%S}'),
         ('Dataset', (f"{args.dataset} "
                      f"({dataset_info['task_type']}, {dataset_info['metric']})")),
         ('Model', params['model_name']),
+        ('unimol_tools', unimol_dir),
+        ('Checkpoint', checkpoint_name(params['remove_hs'])),
         ('Split seed', params['split_seed']),
         ('Random seed', params['random_seed']),
         ('Epochs', params['epochs']),
@@ -186,7 +220,8 @@ def print_header(args: argparse.Namespace, params: dict[str, Any],
         ('Warmup ratio', params['warmup_ratio']),
         ('Max norm', params['max_norm']),
         ('Target scaler', params['target_normalize']),
-        ('Remove Hs', params['remove_hs']),
+        ('Remove Hs', f"{params['remove_hs']} "
+                      f"({'no_h' if params['remove_hs'] else 'all_h'})"),
         ('GPU / AMP', (f"{params['use_gpu']} / {params['use_amp']} "
                        f"(gpu_id={params['gpu_id']})")),
         ('Save to', out_dir or '(--no-save)'),
@@ -201,6 +236,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     os.chdir(PROJECT_ROOT)
 
+    # Fail before any training happens if the wrong unimol_tools is installed.
+    unimol_dir = resolve_unimol_source()
+
     params = training_params(args)
     dataset_info = get_dataset_info(args.dataset)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -208,7 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         'step1', args.dataset, f"seed_{params['split_seed']}", timestamp)
     out_dir = None if args.no_save else os.path.join(OUTPUT_DIR, experiment_name)
 
-    print_header(args, params, dataset_info, out_dir)
+    print_header(args, params, dataset_info, out_dir, unimol_dir)
 
     train_df, valid_df, test_df = load_split(args.dataset, params['split_seed'])
     print(f'\nData -- Train: {len(train_df)}, '

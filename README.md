@@ -66,13 +66,43 @@ run_step1.py: error: unknown key(s) in config: lrate, n_confomer
 allowed: batch_size, epochs, freeze_layers, gpu_id, learning_rate, ...
 ```
 
-Boolean flags are negative-only (`--no-gpu`, `--no-amp`, `--no-remove-hs`) and
+Boolean flags are single-direction (`--no-gpu`, `--no-amp`, `--remove-hs`) and
 write to the positive destination (`use_gpu`, `use_amp`, `remove_hs`), which is
 also the name to use in `config.yaml`.
 
 Results land in `experiments/step1/{dataset}/seed_{X}/{timestamp}/results.json`
 together with the checkpoint, so a 5-seed mean is just an average over the five
 `seed_*` runs.
+
+### Hydrogens and the pretrained checkpoint
+
+`remove_hs` picks which pretrained weights get loaded — see
+`unimol_tools/models/unimol.py`, `name = "no_h" if remove_hs else "all_h"`:
+
+| `remove_hs` | hydrogens | checkpoint |
+|---|---|---|
+| `false` (this project's setting) | kept | `mol_pre_all_h_220816.pt` |
+| `true` | stripped | `mol_pre_no_h_220816.pt` |
+
+The dictionary (`mol.dict.txt`) is the same either way; only the checkpoint and
+the atom list change. `false` is also the unimol_tools default. Keeping the
+hydrogens means more atoms per molecule, so runs are slower and results are not
+comparable with no-H runs.
+
+### Which unimol_tools is actually running
+
+`run_step1.py` resolves `unimol_tools.__file__` before training and aborts if it
+points outside this checkout, then prints the path in the run header. A second
+clone of this repo sharing one conda env is otherwise indistinguishable at
+runtime — `git pull` updates the files, but the installed package keeps pointing
+at wherever `pip install -e` was last run:
+
+```
+unimol_tools resolves to:
+    C:\...\DrugOptimization\Final\UniMol-GP\unimol_source\unimol_tools
+but this repo ships its own patched fork at:
+    C:\...\DrugOptimization\UniMol-GP\unimol_source
+```
 
 ## Split
 
