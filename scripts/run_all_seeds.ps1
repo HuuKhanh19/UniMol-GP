@@ -27,6 +27,10 @@
     # both GPUs: launch twice, odd and even seeds
     .\scripts\run_all_seeds.ps1 -Seeds '0,2,4' -GpuId 0
     .\scripts\run_all_seeds.ps1 -Seeds '1,3'   -GpuId 1
+
+.EXAMPLE
+    # pass options through to run_step2.py
+    .\scripts\run_all_seeds.ps1 -ExtraArgs '--no-probe --es-pop 256'
 #>
 param(
     [string]$Dataset = 'esol',
@@ -34,9 +38,11 @@ param(
     [int]$GpuId = 0,
     [string]$LogDir = 'logs/step2',
     [switch]$SkipSelfTest,
-    # Anything after -- is passed straight through to run_step2.py.
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Extra
+    # Extra run_step2.py flags as one space-separated string. A single string
+    # rather than remaining-arguments: PowerShell's `--` token would otherwise
+    # reach argparse, which treats everything after it as positional and then
+    # rejects the flags.
+    [string]$ExtraArgs = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,9 +129,9 @@ foreach ($job in $plan) {
         '--gpu-id', $GpuId,
         '--init-checkpoint', $job.Checkpoint
     )
-    # Guard the append: `@(...) + $null` appends an empty element, which would
-    # reach argparse as a stray empty argument.
-    if ($Extra) { $argv += $Extra }
+    if ($ExtraArgs) {
+        $argv += $ExtraArgs.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+    }
     python @argv *>&1 | Out-File -FilePath $log -Encoding utf8
 
     $mins = ((Get-Date) - $t0).TotalMinutes
