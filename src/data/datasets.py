@@ -36,7 +36,9 @@ DATASET_REGISTRY = {
     },
     'bace': {
         'file': 'refined_BACE.csv',
-        'smiles_column': 'smiles',
+        # refined_BACE.csv ships ['CID', 'SMILES', 'class'] -- capitalised,
+        # unlike the other three files.
+        'smiles_column': 'SMILES',
         'target_column': 'class',
         'task_type': 'classification',
         'metric': 'auc',
