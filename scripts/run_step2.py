@@ -150,11 +150,11 @@ def set_clean_log_format() -> None:
             handler.setFormatter(fmt)
 
 
-def print_header(args, out_dir, unimol_dir, device, vram_note) -> None:
+def print_header(args, info, out_dir, unimol_dir, device, vram_note) -> None:
     print_banner('UniMol-GP -- Step 2: Symbolic Head + EGGROLL')
     rows = [
         ('Time', f'{datetime.now():%Y-%m-%d %H:%M:%S}'),
-        ('Dataset', args.dataset),
+        ('Dataset', f"{args.dataset} ({info['task_type']}, {info['metric']})"),
         ('unimol_tools', unimol_dir),
         ('Device', device),
         ('Split / search seed', f'{args.split_seed} / {args.random_seed}'),
@@ -202,10 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     torch.backends.cudnn.allow_tf32 = True
 
     dataset_info = get_dataset_info(args.dataset)
-    if dataset_info['task_type'] != 'regression':
-        raise SystemExit(
-            f'step 2 currently supports regression only; {args.dataset} is '
-            f"{dataset_info['task_type']}")
+    metric = dataset_info['metric']
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_dir = None if args.no_save else os.path.join(
@@ -226,7 +223,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     dtype = torch.float32 if args.es_dtype == 'fp32' else torch.bfloat16
     split = SplitUniMol(model, spec, dtype=dtype)
 
-    print_header(args, out_dir, unimol_dir, device, '(after featurisation)')
+    print_header(args, dataset_info, out_dir, unimol_dir, device,
+                 '(after featurisation)')
 
     train_df, valid_df, test_df = load_split(args.dataset, args.split_seed)
     print(f'\nData -- Train: {len(train_df)}, Valid: {len(valid_df)}, '
@@ -247,15 +245,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         data.scaled = (data.raw - data.y_mean) / data.y_std
 
     # Attention memory goes as S^2, and with all_h the longest molecule sets S
-    # for its tile. Report it against the real data rather than a guess.
+    # for its tile, so this can only be checked once the data is featurised.
+    # Checked against *free* VRAM rather than card size: the card may be shared,
+    # and an OOM four hours into an overnight sweep costs the whole night.
     seq = int(splits['train'].n_atoms.max())
     gb = split.attn_bytes(args.es_chunk, args.mol_tile, seq) * 3 / 1024 ** 3
+    free = (torch.cuda.mem_get_info(device)[0] / 1024 ** 3
+            if device.type == 'cuda' else float('inf'))
     print(f'Longest molecule: {seq} atoms -> ~{gb:.1f} GB attention peak '
-          f'(es_chunk={args.es_chunk}, mol_tile={args.mol_tile}); '
-          f'length-sorted tiles make the typical tile smaller.')
-    if gb > 10:
-        print('  warning: that exceeds a comfortable 16 GB budget. '
-              'Halve --es-chunk or --mol-tile.')
+          f'(es_chunk={args.es_chunk}, mol_tile={args.mol_tile}), '
+          f'{free:.1f} GB free; length-sorted tiles make the typical tile '
+          f'smaller.')
+    if args.phases > 0 and gb > 0.8 * free:
+        budget = 0.8 * free / max(gb, 1e-9)
+        raise SystemExit(
+            f'\nthat needs ~{gb:.1f} GB but only {free:.1f} GB is free.\n'
+            f'Rerun with --es-chunk {max(1, int(args.es_chunk * budget))} '
+            f'(or halve --mol-tile instead), or free the GPU first.\n')
 
     gp_cfg = GPConfig(
         n_trees=args.n_trees, pop_size=args.pop_size, max_depth=args.max_depth,
@@ -278,6 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         split, splits['train'], splits['valid'], splits['test'],
         stage_cfg, gp_cfg, es_cfg, device,
         out_dir or os.path.join(OUTPUT_DIR, 'step2', '_scratch'),
+        metric=metric,
     )
     with Timer(f'Step 2 {args.dataset} (split_seed={args.split_seed})'):
         result = trainer.run()

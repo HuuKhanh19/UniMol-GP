@@ -171,8 +171,14 @@ foreach ($r in $results) {
         -Filter 'results.json' -Recurse -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($null -eq $json) { Write-Log ("seed {0}: no results.json" -f $r.Seed); continue }
-    $best = (Get-Content $json.FullName -Raw | ConvertFrom-Json).best
-    Write-Log ("seed {0}: valid={1:N4} test={2:N4} (phase {3})" -f `
-        $r.Seed, $best.valid_rmse, $best.test_rmse, $best.phase)
+    $res = Get-Content $json.FullName -Raw | ConvertFrom-Json
+    $best = $res.best
+    # valid_score/test_score are metric-agnostic; fall back to the rmse keys so
+    # runs made before classification support still summarise.
+    $v = if ($null -ne $best.valid_score) { $best.valid_score } else { $best.valid_rmse }
+    $t = if ($null -ne $best.test_score)  { $best.test_score }  else { $best.test_rmse }
+    $m = if ($res.metric) { $res.metric } else { 'rmse' }
+    Write-Log ("seed {0}: valid={1:N4} test={2:N4} [{3}] (phase {4})" -f `
+        $r.Seed, $v, $t, $m, $best.phase)
 }
 Write-Log "summary written to $summaryPath"

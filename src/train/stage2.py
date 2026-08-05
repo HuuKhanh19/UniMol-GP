@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 import torch
+from sklearn.metrics import roc_auc_score
 
 from src.es.data import MoleculeData, make_folds
 from src.es.eggroll import EGGROLL, ESConfig, embed
@@ -57,8 +58,16 @@ class Stage2Trainer:
     def __init__(self, split: SplitUniMol, train: MoleculeData,
                  valid: MoleculeData, test: MoleculeData,
                  cfg: Stage2Config, gp_cfg: GPConfig, es_cfg: ESConfig,
-                 device: torch.device, out_dir: str):
+                 device: torch.device, out_dir: str, metric: str = 'rmse'):
         self.split = split
+        #: Reporting metric. The *search* fitness is squared error either way:
+        #: on a 0/1 target that is the Brier score, a proper scoring rule, and
+        #: keeping it squared is what lets the ridge merge stay closed-form.
+        #: AUC is a ranking statistic over pairs -- it neither decomposes per
+        #: molecule (which the ES fitness shaping needs) nor admits a
+        #: closed-form fit.
+        self.metric = metric
+        self.higher_is_better = metric == 'auc'
         self.train, self.valid, self.test = train, valid, test
         self.cfg, self.gp_cfg, self.es_cfg = cfg, gp_cfg, es_cfg
         self.device = device
@@ -74,9 +83,11 @@ class Stage2Trainer:
         self.gp = CoevolutionGP(gp_cfg, split.embed_dim, rng, device)
         self.es = EGGROLL(split, train, self.fold_of, es_cfg, device)
         self.history: list[dict] = []
-        self.best = {'valid_rmse': float('inf'), 'phase': -1}
+        worst = -float('inf') if self.higher_is_better else float('inf')
+        self.best = {'valid_score': worst, 'phase': -1}
         self.best_head: GPHead | None = None
         self.phase = 0
+        self._z_train: torch.Tensor | None = None
 
     # --- helpers -------------------------------------------------------------
 
@@ -85,18 +96,48 @@ class Stage2Trainer:
         return embed(self.split, data, np.arange(len(data)), self.device,
                      self.es_cfg.mol_tile)[0]
 
+    def _embed_train(self) -> torch.Tensor:
+        """Train embeddings, cached until ES next moves the backbone.
+
+        The GP phase and the evaluation that follows it run back to back with
+        the weights untouched, so without this the whole training split goes
+        through the encoder twice per phase -- noticeable on Lipophilicity,
+        where that is ~3400 molecules.
+        """
+        if self._z_train is None:
+            self._z_train = self._embed(self.train)
+        return self._z_train
+
+    def _score(self, pred: torch.Tensor, data: MoleculeData) -> float:
+        """Reporting score for one split, in the metric's own units."""
+        if self.metric == 'auc':
+            # A scaffold split can hand a small split a single class, and
+            # roc_auc_score raises on that. 0.5 is the honest score there, and
+            # far better than losing a run hours in.
+            if np.unique(data.raw).size < 2:
+                return 0.5
+            return float(roc_auc_score(data.raw, pred.detach().cpu().numpy()))
+        y = data.targets(np.arange(len(data)), self.device)
+        return float(self.train.rescale(float((pred - y).pow(2).mean().sqrt())))
+
+    def _better(self, candidate: float, incumbent: float) -> bool:
+        return (candidate > incumbent if self.higher_is_better
+                else candidate < incumbent)
+
     def _evaluate(self, head: GPHead) -> dict[str, float]:
-        """Fit the head on train, then score all three splits in raw units."""
-        z_train = self._embed(self.train)
+        """Fit the head on train, then score all three splits."""
+        z_train = self._embed_train()
         head = fit_final(head, z_train, self.y_train, self.gp.rho,
                          self.gp_cfg.probe_penalty_scale)
-        out = {}
+        out = {'metric': self.metric}
         for name, data in (('train', self.train), ('valid', self.valid),
                            ('test', self.test)):
             z = z_train if name == 'train' else self._embed(data)
-            y = data.targets(np.arange(len(data)), self.device)
-            err = (head.predict(z) - y).pow(2).mean().sqrt()
-            out[f'{name}_rmse'] = float(self.train.rescale(float(err)))
+            score = self._score(head.predict(z), data)
+            # Both keys: `_score` is what tooling reads whatever the task is,
+            # `_rmse`/`_auc` keeps the metric legible in the raw json.
+            out[f'{name}_score'] = score
+            out[f'{name}_{self.metric}'] = score
         out.update({f'share_{k}': v for k, v in head.contributions(z_train).items()})
         return out
 
@@ -112,7 +153,7 @@ class Stage2Trainer:
     # --- phases --------------------------------------------------------------
 
     def _gp_phase(self, n_gens: int, label: str) -> GPHead:
-        z = self._embed(self.train)
+        z = self._embed_train()
         if self.gp_cfg.replicas > 1:
             z = self._replicated(z)
         hist = self.gp.evolve(z, self.y_train, self.folds, n_gens,
@@ -146,6 +187,7 @@ class Stage2Trainer:
         stats = []
         for _ in range(n_steps):
             stats.append(self.es.step())
+        self._z_train = None          # the backbone moved; the cache is stale
         mean_sec = float(np.mean([s['sec'] for s in stats]))
         last = stats[-1]
         print(f'    ES: cv(pop mean)={last["pop_cv_rmse_mean"]:.4f} '
@@ -166,9 +208,10 @@ class Stage2Trainer:
         print(f'\n  warm-up GP ({cfg.warm_gens} generations)')
         head = self._gp_phase(cfg.warm_gens, 'warm')
         metrics = self._evaluate(head)
-        print(f'    valid={metrics["valid_rmse"]:.4f} test={metrics["test_rmse"]:.4f}'
+        print(f'    valid={metrics["valid_score"]:.4f} '
+              f'test={metrics["test_score"]:.4f}'
               f'  (trees carry {metrics.get("share_trees", 0):.0%} of the signal)')
-        self.best = {**metrics, 'phase': 0, 'valid_rmse': metrics['valid_rmse']}
+        self.best = {**metrics, 'phase': 0}
         self.best_head = head
         self._snapshot('best', head)
         self.history.append({'phase': 0, 'stage': 'warm', **metrics})
@@ -182,12 +225,12 @@ class Stage2Trainer:
 
             head = self._gp_phase(cfg.gp_gens, f'phase {phase}')
             metrics = self._evaluate(head)
-            print(f'    valid={metrics["valid_rmse"]:.4f} '
-                  f'test={metrics["test_rmse"]:.4f}')
+            print(f'    valid={metrics["valid_score"]:.4f} '
+                  f'test={metrics["test_score"]:.4f}')
 
             self.history.append({'phase': phase, 'stage': 'alternate',
                                  **metrics, **es_stats})
-            if metrics['valid_rmse'] < self.best['valid_rmse']:
+            if self._better(metrics['valid_score'], self.best['valid_score']):
                 self.best = {**metrics, 'phase': phase}
                 self.best_head = head
                 self._snapshot('best', head)
@@ -204,6 +247,7 @@ class Stage2Trainer:
         # loop happened to end on.
         winner = self.best_head or head
         result = {
+            'metric': self.metric,
             'best': self.best,
             'history': self.history,
             'formulas': winner.formulas(),
@@ -221,7 +265,8 @@ class Stage2Trainer:
 
         print(f'\n{"=" * 68}')
         print(f'  best phase {self.best["phase"]}: '
-              f'valid={self.best["valid_rmse"]:.4f} test={self.best["test_rmse"]:.4f}')
+              f'valid={self.best["valid_score"]:.4f} '
+              f'test={self.best["test_score"]:.4f} ({self.metric})')
         print(f'  elapsed {result["elapsed_sec"] / 60:.1f} min')
         print(f'{"=" * 68}\n')
         return result
