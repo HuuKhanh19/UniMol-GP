@@ -209,9 +209,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         OUTPUT_DIR, 'step2', args.dataset, f'seed_{args.split_seed}', timestamp)
 
     set_clean_log_format()
+    from unimol_tools.models.nnmodel import OUTPUT_DIM
     from unimol_tools.models.unimol import UniMolModel
 
-    model = UniMolModel(output_dim=1, data_type='molecule',
+    # Step 2 never uses classification_head -- it reads the CLS representation
+    # straight out of the encoder -- but the head still has to be the shape the
+    # Step 1 checkpoint was saved with, or load_state_dict rejects the whole
+    # file. strict=False does not help: it forgives missing and unexpected keys,
+    # never a shape mismatch. Classification checkpoints carry a 2-way head.
+    model = UniMolModel(output_dim=OUTPUT_DIM[dataset_info['task_type']],
+                        data_type='molecule',
                         remove_hs=args.remove_hs).to(device).eval()
     if args.init_checkpoint:
         model.load_pretrained_weights(args.init_checkpoint)
