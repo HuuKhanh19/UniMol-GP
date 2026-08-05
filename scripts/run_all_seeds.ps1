@@ -58,6 +58,24 @@ if (-not $PSBoundParameters.ContainsKey('LogDir')) {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $summaryPath = Join-Path $LogDir 'sweep.log'
 
+function Invoke-Logged {
+    <#
+      Run python with every stream going to one file.
+
+      Not `python ... *>&1 | Out-File`: PowerShell wraps each stderr line from a
+      native command in a NativeCommandError, and with $ErrorActionPreference =
+      'Stop' the first one terminates the script. unimol_tools logs to stderr,
+      so that fires on its very first line. Handing the redirection to cmd keeps
+      PowerShell's error machinery out of the way entirely.
+    #>
+    param([string[]]$Argv, [string]$LogPath)
+    $quoted = ($Argv | ForEach-Object {
+        if ("$_" -match '[\s"]') { '"' + ("$_" -replace '"', '\"') + '"' } else { "$_" }
+    }) -join ' '
+    cmd /c "python $quoted > `"$LogPath`" 2>&1"
+    return $LASTEXITCODE
+}
+
 function Write-Log($message) {
     $line = "[{0:HH:mm:ss}] {1}" -f (Get-Date), $message
     Write-Host $line
@@ -104,10 +122,8 @@ foreach ($job in $plan) {
 if (-not $SkipSelfTest) {
     Write-Log 'running self-test'
     $selfTestLog = Join-Path $LogDir 'selftest.log'
-    # Out-File, not Tee-Object: under -WindowStyle Hidden there is no console
-    # for Tee to mirror to, and that is a good way to stall a detached sweep.
-    python -u scripts/selftest.py *>&1 | Out-File -FilePath $selfTestLog -Encoding utf8
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Logged -Argv @('-u', 'scripts/selftest.py') -LogPath $selfTestLog
+    if ($code -ne 0) {
         Write-Log "self-test FAILED (see $selfTestLog) - aborting before any training"
         exit 1
     }
@@ -132,10 +148,10 @@ foreach ($job in $plan) {
     if ($ExtraArgs) {
         $argv += $ExtraArgs.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
     }
-    python @argv *>&1 | Out-File -FilePath $log -Encoding utf8
+    $code = Invoke-Logged -Argv $argv -LogPath $log
 
     $mins = ((Get-Date) - $t0).TotalMinutes
-    $status = if ($LASTEXITCODE -eq 0) { 'ok' } else { "FAILED (exit $LASTEXITCODE)" }
+    $status = if ($code -eq 0) { 'ok' } else { "FAILED (exit $code)" }
     Write-Log ("done  seed {0}: {1} in {2:N1} min" -f $seed, $status, $mins)
     $results += [pscustomobject]@{ Seed = $seed; Status = $status; Minutes = $mins }
 }
