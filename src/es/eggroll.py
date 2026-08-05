@@ -105,6 +105,7 @@ class EGGROLL:
         )
         self._batch: np.ndarray | None = None
         self._batch_folds: list[torch.Tensor] = []
+        self._batch_fold_of: np.ndarray | None = None
         self._batch_y: torch.Tensor | None = None
 
     # --- wiring --------------------------------------------------------------
@@ -133,6 +134,7 @@ class EGGROLL:
             for f in range(cfg.n_folds)
             if np.any(folds_here == f)
         ]
+        self._batch_fold_of = folds_here
         self._batch_y = self.data.targets(self._batch, self.device)
 
     # --- forward -------------------------------------------------------------
@@ -144,9 +146,15 @@ class EGGROLL:
 
     @torch.no_grad()
     def squared_error(self, z: torch.Tensor, y: torch.Tensor,
-                      folds: list[torch.Tensor]) -> torch.Tensor:
-        """``(N, n)`` out-of-fold squared error for each population member."""
-        design, _ = self.head.design(z)
+                      folds: list[torch.Tensor],
+                      fold_of: np.ndarray) -> torch.Tensor:
+        """``(N, n)`` out-of-fold squared error for each population member.
+
+        ``fold_of`` keeps the probe column out-of-fold; without it the column
+        carries labels for the very rows the CV holds out, the score collapses
+        and every perturbation looks equally good.
+        """
+        design, _ = self.head.design(z, fold_of=fold_of)
         if design.dim() == 2:
             design = design.unsqueeze(0)
         return ridge.cv_squared_error(design, y, folds, self._penalty(z.shape[-2]))
@@ -170,7 +178,8 @@ class EGGROLL:
         for start in range(0, cfg.pop_size, cfg.pop_chunk):
             stop = min(start + cfg.pop_chunk, cfg.pop_size)
             z = self.embed(self._batch, pert.slice(start, stop), stop - start)
-            errors.append(self.squared_error(z, self._batch_y, self._batch_folds))
+            errors.append(self.squared_error(
+                z, self._batch_y, self._batch_folds, self._batch_fold_of))
         sq = torch.cat(errors, dim=0)                        # (pop, n_batch)
 
         fitness = shaping.shape(sq, cfg.shaping, cfg.antithetic)
@@ -208,4 +217,4 @@ class EGGROLL:
         ]
         z = self.embed(idx, None, 1)
         y = self.data.targets(idx, self.device)
-        return float(self.squared_error(z, y, folds).mean().sqrt())
+        return float(self.squared_error(z, y, folds, folds_here).mean().sqrt())

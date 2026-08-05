@@ -66,6 +66,10 @@ class GPHead:
         self.beta: np.ndarray | None = None
         self.probe_w: np.ndarray | None = None
         self.probe_b: float = 0.0
+        #: One probe per CV fold, each fitted without that fold. Used only while
+        #: searching; the deployed head uses the all-rows probe above.
+        self.probe_folds_w: np.ndarray | None = None
+        self.probe_folds_b: np.ndarray | None = None
         #: Frozen normalisation captured at fit time. While searching we
         #: recompute RMS per batch (per ES member, even) because that scale
         #: invariance is part of what VarPro buys us; once the head is frozen
@@ -87,10 +91,27 @@ class GPHead:
 
     # --- design matrix -------------------------------------------------------
 
-    def probe_column(self, z: torch.Tensor) -> torch.Tensor:
-        """``(..., n, 1)`` linear-probe feature."""
-        w = torch.as_tensor(self.probe_w, device=z.device, dtype=z.dtype)
-        return (z @ w + self.probe_b).unsqueeze(-1) / max(self.probe_rms, 1e-12)
+    def probe_column(self, z: torch.Tensor,
+                     fold_of: np.ndarray | None = None) -> torch.Tensor:
+        """``(M, n, 1)`` linear-probe feature.
+
+        With ``fold_of``, each row is scored by the probe fitted *without* that
+        row's CV fold. This matters: the deployment probe is fitted on every
+        training row, so using it as a column inside a CV over those same rows
+        leaks the labels -- the column already encodes ``y`` for every held-out
+        molecule, the CV score collapses, and the trees look worthless because
+        they are competing against a fitted prediction rather than against raw
+        features.
+        """
+        if fold_of is None or self.probe_folds_w is None:
+            w = torch.as_tensor(self.probe_w, device=z.device, dtype=z.dtype)
+            col = z @ w + self.probe_b
+        else:
+            w = torch.as_tensor(self.probe_folds_w, device=z.device, dtype=z.dtype)
+            b = torch.as_tensor(self.probe_folds_b, device=z.device, dtype=z.dtype)
+            f = torch.as_tensor(fold_of, device=z.device, dtype=torch.long)
+            col = (z * w[f]).sum(dim=-1) + b[f]
+        return col.unsqueeze(-1) / max(self.probe_rms, 1e-12)
 
     def tree_columns(self, z: torch.Tensor) -> torch.Tensor:
         """``(M, n, k)`` raw tree outputs for ``z`` of shape ``(..., n, d)``."""
@@ -98,13 +119,16 @@ class GPHead:
         cols = evaluate(self.genomes, z.reshape(-1, d))   # (k, M*n)
         return cols.reshape(self.n_trees, -1, n).permute(1, 2, 0)
 
-    def design(self, z: torch.Tensor, freeze_scale: bool = False
+    def design(self, z: torch.Tensor, freeze_scale: bool = False,
+               fold_of: np.ndarray | None = None
                ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build the ridge design matrix.
 
         Args:
             z: ``(n, d)`` or ``(M, n, d)`` embeddings.
             freeze_scale: use the stored ``col_rms`` instead of the batch RMS.
+            fold_of: ``(n,)`` CV fold per row. Pass it whenever the design feeds
+                a cross-validated score, so the probe column is out-of-fold.
 
         Returns:
             ``(design, rms)`` where design is ``(..., n, n_cols)`` and rms is
@@ -125,7 +149,9 @@ class GPHead:
 
         parts = [torch.ones(cols.shape[0], n, 1, device=z.device, dtype=cols.dtype)]
         if self.use_probe:
-            parts.append(self.probe_column(z.reshape(-1, n, z.shape[-1])))
+            parts.append(
+                self.probe_column(z.reshape(-1, n, z.shape[-1]), fold_of)
+            )
         parts.append(cols)
         design = torch.cat(parts, dim=-1)
         return design.reshape(*lead, n, self.n_cols) if lead else design[0], rms
@@ -187,6 +213,10 @@ class GPHead:
             beta=np.asarray(self.beta if self.beta is not None else []),
             probe_w=np.asarray(self.probe_w if self.probe_w is not None else []),
             probe_b=np.asarray(self.probe_b),
+            probe_folds_w=np.asarray(
+                self.probe_folds_w if self.probe_folds_w is not None else []),
+            probe_folds_b=np.asarray(
+                self.probe_folds_b if self.probe_folds_b is not None else []),
             col_rms=np.asarray(self.col_rms if self.col_rms is not None else []),
             probe_rms=np.asarray(self.probe_rms),
             use_probe=np.asarray(self.use_probe),
@@ -203,6 +233,10 @@ class GPHead:
         head.beta = d['beta'] if d['beta'].size else None
         head.probe_w = d['probe_w'] if d['probe_w'].size else None
         head.probe_b = float(d['probe_b'])
+        head.probe_folds_w = (
+            d['probe_folds_w'] if d['probe_folds_w'].size else None)
+        head.probe_folds_b = (
+            d['probe_folds_b'] if d['probe_folds_b'].size else None)
         head.col_rms = d['col_rms'] if d['col_rms'].size else None
         head.probe_rms = float(d['probe_rms'])
         return head
@@ -230,3 +264,32 @@ def fit_probe(z: torch.Tensor, y: torch.Tensor, rho: float = 1e-2
     col = (z.double() @ w + b)
     rms = float(col.pow(2).mean().sqrt().clamp_min(1e-12))
     return w.float().cpu().numpy(), b, rms
+
+
+def fit_probe_folds(z: torch.Tensor, y: torch.Tensor, fold_of: np.ndarray,
+                    n_folds: int, rho: float = 1e-2
+                    ) -> tuple[np.ndarray, np.ndarray, float]:
+    """One linear probe per CV fold, each fitted on the *other* folds.
+
+    Assembling the probe column from these makes it out-of-fold for any subset
+    of the training rows, which is what the GP and ES fitness both need: a probe
+    fitted on all rows would hand the cross-validation a column that already
+    encodes the held-out labels.
+
+    Returns ``(W, b, rms)`` with ``W`` of shape ``(n_folds, d)``.
+    """
+    ws, bs = [], []
+    for f in range(n_folds):
+        keep = np.nonzero(fold_of != f)[0]
+        idx = torch.as_tensor(keep, device=z.device, dtype=torch.long)
+        w, b, _ = fit_probe(z.index_select(0, idx), y.index_select(0, idx), rho)
+        ws.append(w)
+        bs.append(b)
+
+    w_all = np.stack(ws).astype(np.float32)
+    b_all = np.asarray(bs, dtype=np.float32)
+    wt = torch.as_tensor(w_all, device=z.device, dtype=z.dtype)
+    bt = torch.as_tensor(b_all, device=z.device, dtype=z.dtype)
+    ft = torch.as_tensor(fold_of, device=z.device, dtype=torch.long)
+    col = (z * wt[ft]).sum(dim=-1) + bt[ft]
+    return w_all, b_all, float(col.pow(2).mean().sqrt().clamp_min(1e-12))

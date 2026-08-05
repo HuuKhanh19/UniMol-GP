@@ -35,6 +35,7 @@ from src.head.gp_head import (
     N_UNPENALIZED,
     contiguous_regions,
     fit_probe,
+    fit_probe_folds,
     random_regions,
 )
 
@@ -54,9 +55,11 @@ class GPConfig:
     p_subtree: float = 0.10
     p_const: float = 0.15
     const_sigma: float = 0.3
-    #: Size penalty added to the CV RMSE, per node. At RMSE ~0.7 and ~30 nodes,
-    #: 5e-4 costs a tree about 0.015 -- enough to break ties toward the smaller
-    #: formula without letting size override accuracy.
+    #: Size penalty as a *fraction* of the CV score, per node: a 30-node tree
+    #: pays 1.5% at the default. It has to be relative -- the CV score here is
+    #: in standardised target units and sits around 0.1, so an absolute penalty
+    #: of the same nominal size costs >0.5% of total error per node and drives
+    #: every tree to a single variable regardless of how much signal it loses.
     parsimony: float = 5e-4
     use_probe: bool = True
     #: Extra shrinkage on the probe column. >1 makes the linear crutch more
@@ -119,6 +122,8 @@ class CoevolutionGP:
         self.probe_w: np.ndarray | None = None
         self.probe_b = 0.0
         self.probe_rms = 1.0
+        self.probe_folds_w: np.ndarray | None = None
+        self.probe_folds_b: np.ndarray | None = None
         self.rho = cfg.rho
 
     # --- helpers -------------------------------------------------------------
@@ -135,6 +140,9 @@ class CoevolutionGP:
         head = GPHead(genomes.copy(), self.regions, use_probe=self.cfg.use_probe)
         head.probe_w, head.probe_b, head.probe_rms = (
             self.probe_w, self.probe_b, self.probe_rms
+        )
+        head.probe_folds_w, head.probe_folds_b = (
+            self.probe_folds_w, self.probe_folds_b
         )
         return head
 
@@ -205,15 +213,27 @@ class CoevolutionGP:
             torch.cat([f + r * n_rows for r in range(n_rep)]) for f in folds
         ]
 
-        self.probe_w, self.probe_b, self.probe_rms = (
-            fit_probe(z[0], y, rho=cfg.rho) if cfg.use_probe else (None, 0.0, 1.0)
-        )
+        # Row -> fold, so the probe column can be made out-of-fold and the CV
+        # is not handed a feature that already encodes the held-out labels.
+        fold_of = np.zeros(n_rows, dtype=np.int64)
+        for f, held in enumerate(folds):
+            fold_of[held.cpu().numpy()] = f
+        fold_of_eff = np.tile(fold_of, n_rep)
+
+        if cfg.use_probe:
+            self.probe_w, self.probe_b, self.probe_rms = fit_probe(
+                z[0], y, rho=cfg.rho)
+            self.probe_folds_w, self.probe_folds_b, _ = fit_probe_folds(
+                z[0], y, fold_of, len(folds), rho=cfg.rho)
+        else:
+            self.probe_w, self.probe_b, self.probe_rms = None, 0.0, 1.0
+            self.probe_folds_w = self.probe_folds_b = None
         head = self.head()
         off = head.tree_col_offset
         n_cols = head.n_cols
         y_eff = y.repeat(n_rep)
 
-        base, _ = head.design(z_flat)                      # (n_eff, n_cols)
+        base, _ = head.design(z_flat, fold_of=fold_of_eff)  # (n_eff, n_cols)
         if cfg.tune_rho:
             self.rho, _ = ridge.select_rho(
                 base.unsqueeze(0), y_eff, folds_eff, cfg.rho_grid, N_UNPENALIZED,
@@ -238,9 +258,9 @@ class CoevolutionGP:
                 design[:, :, off + j] = phi
                 score = ridge.cv_score(design, y_eff, folds_eff, penalty, bad)
 
-                fitness = (score + cfg.parsimony * torch.as_tensor(
+                fitness = (score * (1 + cfg.parsimony * torch.as_tensor(
                     island.length, device=score.device, dtype=score.dtype
-                )).cpu().numpy()
+                ))).cpu().numpy()
 
                 best = int(np.argmin(fitness))
                 # Every candidate can be degenerate early on; keeping the old
