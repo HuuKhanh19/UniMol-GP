@@ -13,6 +13,7 @@ scripts/
   preprocess_data.py     raw CSV -> cleaned + split -> data/processed/
   run_step1.py           UniMol v1 fine-tuning + evaluation
   run_step2.py           symbolic GP head + EGGROLL fine-tuning
+  summarise.py           mean +/- std over the seeds of one family
   selftest.py            correctness checks -- run before any step-2 training
 src/
   data/datasets.py       dataset registry and project constants
@@ -61,7 +62,16 @@ python scripts/run_step1.py --dataset esol --split-seed 0
 # Every knob is a flag; --help is the full reference
 python scripts/run_step1.py --dataset esol --split-seed 2 --epochs 50 --gpu-id 1
 python scripts/run_step1.py --help
+
+# 3. Mean +/- std over the seeds run so far
+python scripts/summarise.py --split scaffold --step 1
 ```
+
+`run_step1.py` calls `summarise` itself at the end of every run, so the
+five-seed mean appears on the terminal as soon as the last seed of a sweep
+finishes -- no second command, nothing to remember. Where a seed has been run
+more than once the newest run wins, and the standard deviation is the sample
+one (`ddof=1`), omitted entirely when only one seed exists.
 
 ### Configuration
 

@@ -67,11 +67,17 @@ def split_dir(split: str, dataset_name: str, split_seed: int) -> str:
                         f'seed_{split_seed}')
 
 
+def dataset_dir(split: str, step: str, dataset_name: str) -> str:
+    """Directory holding every seed of one (split, step, dataset), relative
+    to OUTPUT_DIR."""
+    return os.path.join(split, step, dataset_name)
+
+
 def experiment_name(split: str, step: str, dataset_name: str,
                     split_seed: int, timestamp: str = '') -> str:
     """Run directory, relative to OUTPUT_DIR."""
     tail = [timestamp] if timestamp else []
-    return os.path.join(split, step, dataset_name,
+    return os.path.join(dataset_dir(split, step, dataset_name),
                         f'seed_{split_seed}', *tail)
 
 

@@ -28,6 +28,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+from scripts.summarise import summarise  # noqa: E402
 from src.data import DATASET_NAMES, get_dataset_info  # noqa: E402
 from src.data.datasets import (  # noqa: E402
     DEFAULT_SPLIT,
@@ -253,6 +254,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         results_path = os.path.join(out_dir, 'results.json')
         save_json(results, results_path)
         print(f'Results saved -- {results_path}')
+        # Every seed done so far, this one included, so the five-seed mean shows
+        # up on its own once the last seed of a sweep finishes.
+        summarise(params['split'], 1, args.dataset)
     else:
         print('(--no-save: results not saved)')
 
