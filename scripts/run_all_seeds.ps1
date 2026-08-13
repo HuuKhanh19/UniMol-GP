@@ -15,8 +15,9 @@
     experiment whose numbers must not be mixed in with the rest.
 
     -Split picks the split family and must match how preprocess_data.py and
-    run_step1.py were run. It also selects the paths: 'scaffold' uses the flat
-    seed_{n} layout, anything else nests under {split}/seed_{n}, so the two
+    run_step1.py were run. It is also the top path component for the splits it
+    reads, the runs it writes and its own logs -- data/processed/{split}/...,
+    experiments/{split}/step2/... and logs/{split}/step2/... -- so the two
     families never share a directory.
 
 .EXAMPLE
@@ -29,9 +30,10 @@
         '-NoProfile','-ExecutionPolicy','Bypass','-File','scripts\run_all_seeds.ps1'
 
 .EXAMPLE
-    # the full random-split matrix, split across the two GPUs
-    .\scripts\run_all_seeds.ps1 -Split random -Dataset 'esol,freesolv' -GpuId 0
-    .\scripts\run_all_seeds.ps1 -Split random -Dataset 'lipo,bace'     -GpuId 1
+    # the full random-split matrix, split across the two GPUs. lipo is roughly
+    # as expensive as the other three together, so it gets a card to itself.
+    .\scripts\run_all_seeds.ps1 -Split random -Dataset 'lipo' -GpuId 0
+    .\scripts\run_all_seeds.ps1 -Split random -Dataset 'esol,freesolv,bace' -GpuId 1
 
 .EXAMPLE
     # both GPUs on one dataset: launch twice, odd and even seeds
@@ -49,7 +51,8 @@ param(
     [ValidateSet('scaffold', 'random')]
     [string]$Split = 'scaffold',
     [int]$GpuId = 0,
-    [string]$LogDir = 'logs/step2',
+    # Defaults to logs/{split}/step2/{timestamp} -- see below.
+    [string]$LogDir = '',
     [switch]$SkipSelfTest,
     # Extra run_step2.py flags as one space-separated string. A single string
     # rather than remaining-arguments: PowerShell's `--` token would otherwise
@@ -67,23 +70,20 @@ $seedList = $Seeds.Split(',') | ForEach-Object { [int]$_.Trim() }
 # An explicit -LogDir is used verbatim, so the log paths are predictable enough
 # to tail by name. The default gets a timestamp so successive sweeps don't
 # overwrite each other.
-if (-not $PSBoundParameters.ContainsKey('LogDir')) {
-    $LogDir = Join-Path $LogDir (Get-Date -Format 'yyyyMMdd_HHmmss')
+if (-not $LogDir) {
+    $LogDir = "logs/$Split/step2/" + (Get-Date -Format 'yyyyMMdd_HHmmss')
 }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $summaryPath = Join-Path $LogDir 'sweep.log'
 
 function Get-SeedPath {
     <#
-      Directory for one (dataset, split, seed), mirroring _split_parts() in
-      src/data/datasets.py. Keep the two in step: the scaffold family stays in
-      the flat layout its existing checkpoints and results were written to.
+      Directory for one seed under an already split-qualified root, mirroring
+      split_dir() / experiment_name() in src/data/datasets.py. Keep the two in
+      step.
     #>
-    param([string]$Root, [string]$DatasetName, [string]$SplitName, [int]$Seed)
-    $parts = @($Root, $DatasetName)
-    if ($SplitName -ne 'scaffold') { $parts += $SplitName }
-    $parts += "seed_$Seed"
-    return ($parts -join '/')
+    param([string]$Root, [string]$DatasetName, [int]$Seed)
+    return "$Root/$DatasetName/seed_$Seed"
 }
 
 function Invoke-Logged {
@@ -120,12 +120,12 @@ $plan = @()
 $skipped = @()
 foreach ($ds in $datasetList) {
     foreach ($seed in $seedList) {
-        $splitDir = Get-SeedPath 'data/processed' $ds $Split $seed
+        $splitDir = Get-SeedPath "data/processed/$Split" $ds $seed
         if (-not (Test-Path "$splitDir/${ds}_train.csv")) {
             $skipped += "$ds seed $seed - no split at $splitDir (run preprocess_data.py --split $Split)"
             continue
         }
-        $ckptRoot = Get-SeedPath 'experiments/step1' $ds $Split $seed
+        $ckptRoot = Get-SeedPath "experiments/$Split/step1" $ds $seed
         $ckpt = $null
         if (Test-Path $ckptRoot) {
             $ckpt = Get-ChildItem -Path $ckptRoot -Filter 'model_0.pth' -Recurse `
@@ -167,7 +167,7 @@ $results = @()
 foreach ($job in $plan) {
     $ds = $job.Dataset
     $seed = $job.Seed
-    $log = Join-Path $LogDir "${ds}_${Split}_seed${seed}.log"
+    $log = Join-Path $LogDir "${ds}_seed${seed}.log"
     Write-Log "start $ds seed $seed -> $log"
     $t0 = Get-Date
 
@@ -204,7 +204,7 @@ foreach ($r in $results) {
 Write-Log '--- best per run (valid-selected) ---'
 foreach ($r in $results) {
     if ($r.Status -ne 'ok') { continue }
-    $root = Get-SeedPath 'experiments/step2' $r.Dataset $Split $r.Seed
+    $root = Get-SeedPath "experiments/$Split/step2" $r.Dataset $r.Seed
     $json = Get-ChildItem -Path $root -Filter 'results.json' -Recurse `
         -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1

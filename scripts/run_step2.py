@@ -13,9 +13,9 @@ the full reference. There is no config file.
 Usage:
     python scripts/run_step2.py --dataset esol --split-seed 0
     python scripts/run_step2.py --dataset esol --split-seed 0 --gpu-id 1 \
-        --init-checkpoint experiments/step1/esol/seed_0/<ts>/model_0.pth
+        --init-checkpoint experiments/scaffold/step1/esol/seed_0/<ts>/model_0.pth
     python scripts/run_step2.py --dataset esol --split random --split-seed 0 \
-        --init-checkpoint experiments/step1/esol/random/seed_0/<ts>/model_0.pth
+        --init-checkpoint experiments/random/step1/esol/seed_0/<ts>/model_0.pth
     python scripts/run_step2.py --help
 """
 
@@ -219,8 +219,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_dir = None if args.no_save else os.path.join(
-        OUTPUT_DIR, experiment_name('step2', args.dataset, args.split_seed,
-                                    args.split, timestamp))
+        OUTPUT_DIR, experiment_name(args.split, 'step2', args.dataset,
+                                    args.split_seed, timestamp))
 
     set_clean_log_format()
     from unimol_tools.models.nnmodel import OUTPUT_DIM
@@ -305,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     trainer = Stage2Trainer(
         split, splits['train'], splits['valid'], splits['test'],
         stage_cfg, gp_cfg, es_cfg, device,
-        out_dir or os.path.join(OUTPUT_DIR, 'step2', '_scratch'),
+        out_dir or os.path.join(OUTPUT_DIR, args.split, 'step2', '_scratch'),
         metric=metric,
     )
     with Timer(f'Step 2 {args.dataset} '

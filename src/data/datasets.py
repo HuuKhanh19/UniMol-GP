@@ -55,32 +55,24 @@ DATASET_REGISTRY = {
 DATASET_NAMES = list(DATASET_REGISTRY.keys())
 
 
-def _split_parts(split: str, split_seed: int) -> list[str]:
-    """Path components that identify one split of one dataset.
-
-    The scaffold split keeps the original flat ``seed_{n}`` layout so the
-    existing processed CSVs, Step 1 checkpoints and published scaffold numbers
-    all still resolve at the paths they were written to. Every other split type
-    gets its own subtree, so the two families can never be mixed up in a
-    results table.
-    """
-    parts = [] if split == DEFAULT_SPLIT else [split]
-    return parts + [f'seed_{split_seed}']
+# The split family is the top path component everywhere -- processed CSVs,
+# runs and logs -- so a whole experiment family is one directory that can be
+# copied, archived or deleted on its own, and no results table can silently mix
+# scaffold numbers with random ones.
 
 
-def split_dir(dataset_name: str, split_seed: int,
-              split: str = DEFAULT_SPLIT) -> str:
+def split_dir(split: str, dataset_name: str, split_seed: int) -> str:
     """Directory holding one dataset's train/valid/test CSVs."""
-    return os.path.join(PROCESSED_DIR, dataset_name,
-                        *_split_parts(split, split_seed))
+    return os.path.join(PROCESSED_DIR, split, dataset_name,
+                        f'seed_{split_seed}')
 
 
-def experiment_name(step: str, dataset_name: str, split_seed: int,
-                    split: str = DEFAULT_SPLIT, timestamp: str = '') -> str:
-    """Run directory, relative to OUTPUT_DIR, matching the split layout."""
+def experiment_name(split: str, step: str, dataset_name: str,
+                    split_seed: int, timestamp: str = '') -> str:
+    """Run directory, relative to OUTPUT_DIR."""
     tail = [timestamp] if timestamp else []
-    return os.path.join(step, dataset_name,
-                        *_split_parts(split, split_seed), *tail)
+    return os.path.join(split, step, dataset_name,
+                        f'seed_{split_seed}', *tail)
 
 
 def get_dataset_info(name: str) -> dict:

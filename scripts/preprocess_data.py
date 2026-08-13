@@ -4,8 +4,7 @@ Preprocess: clean raw CSVs and write train/valid/test splits.
 
 All configuration lives in argparse, like run_step1.py. There is no config file.
 
-Output: data/processed/{dataset}/seed_{n}/{dataset}_{train,valid,test}.csv
-        data/processed/{dataset}/random/seed_{n}/... for --split random
+Output: data/processed/{split}/{dataset}/seed_{n}/{dataset}_{train,valid,test}.csv
 
 Usage:
     python scripts/preprocess_data.py --dataset esol
@@ -65,7 +64,7 @@ def preprocess(dataset_name: str, split_seed: int,
     )
     frames = (('train', train_df), ('valid', valid_df), ('test', test_df))
 
-    out_dir = split_dir(dataset_name, split_seed, split)
+    out_dir = split_dir(split, dataset_name, split_seed)
     os.makedirs(out_dir, exist_ok=True)
     for name, df in frames:
         df.to_csv(os.path.join(out_dir, f'{dataset_name}_{name}.csv'),

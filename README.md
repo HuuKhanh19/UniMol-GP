@@ -7,16 +7,16 @@ Bemis-Murcko scaffold split.
 
 ```
 data/raw/                refined_*.csv source files (not tracked)
-data/processed/          scaffold splits, one dir per dataset/seed (not tracked)
-experiments/             training runs + results.json (not tracked)
+data/processed/          splits, {split}/{dataset}/seed_{n}/ (not tracked)
+experiments/             runs + results.json, {split}/step{1,2}/... (not tracked)
 scripts/
-  preprocess_data.py     raw CSV -> cleaned + scaffold split -> data/processed/
+  preprocess_data.py     raw CSV -> cleaned + split -> data/processed/
   run_step1.py           UniMol v1 fine-tuning + evaluation
   run_step2.py           symbolic GP head + EGGROLL fine-tuning
   selftest.py            correctness checks -- run before any step-2 training
 src/
   data/datasets.py       dataset registry and project constants
-  data/splitters.py      Bemis-Murcko scaffold split
+  data/splitters.py      Bemis-Murcko scaffold split, and plain random split
   data/data_loader.py    load / clean / split pipeline
   models/unimol_wrapper.py   MolTrain + MolPredict wrapper, Step1Trainer
   head/                  symbolic head: postfix trees, GP, ridge merge
@@ -51,8 +51,9 @@ version first.
 ## Usage
 
 ```bash
-# 1. Scaffold-split the raw data (one dir per seed)
+# 1. Split the raw data (one dir per seed)
 python scripts/preprocess_data.py --dataset all --split-seed 0 1 2 3 4
+python scripts/preprocess_data.py --dataset all --split random --split-seed 0 1 2 3 4
 
 # 2. Train + evaluate one seed
 python scripts/run_step1.py --dataset esol --split-seed 0
@@ -79,7 +80,7 @@ For repeatable runs, put the flags in a shell script or record the exact command
 in your notes; `results.json` also stores the fully resolved `params` of every
 run, so any result can be traced back to the settings that produced it.
 
-Results land in `experiments/step1/{dataset}/seed_{X}/{timestamp}/results.json`
+Results land in `experiments/{split}/step1/{dataset}/seed_{X}/{timestamp}/results.json`
 together with the checkpoint, so a 5-seed mean is just an average over the five
 `seed_*` runs.
 
@@ -125,7 +126,7 @@ descent.
 python scripts/selftest.py
 
 python scripts/run_step2.py --dataset esol --split-seed 0 \
-    --init-checkpoint experiments/step1/esol/seed_0/<timestamp>/model_0.pth
+    --init-checkpoint experiments/scaffold/step1/esol/seed_0/<timestamp>/model_0.pth
 ```
 
 For a full sweep, `scripts/run_all_seeds.ps1` runs one (dataset, seed) after
@@ -140,9 +141,10 @@ at the end:
 .\scripts\run_all_seeds.ps1 -Seeds '0,2,4' -GpuId 0        # split across both
 .\scripts\run_all_seeds.ps1 -Seeds '1,3'   -GpuId 1        #   GPUs, run twice
 
-# the whole random-split matrix, one GPU per half
-.\scripts\run_all_seeds.ps1 -Split random -Dataset 'esol,freesolv' -GpuId 0
-.\scripts\run_all_seeds.ps1 -Split random -Dataset 'lipo,bace'     -GpuId 1
+# the whole random-split matrix; lipo costs about as much as the other
+# three together, so it gets a card to itself
+.\scripts\run_all_seeds.ps1 -Split random -Dataset 'lipo' -GpuId 0
+.\scripts\run_all_seeds.ps1 -Split random -Dataset 'esol,freesolv,bace' -GpuId 1
 ```
 
 A seed with no Step 1 checkpoint is skipped rather than quietly started from the
@@ -243,14 +245,17 @@ directly.
 The flag runs the whole way through `preprocess_data.py`, `run_step1.py` and
 `run_step2.py`, and picks the paths as well as the splitter:
 
-| `--split` | processed CSVs | runs |
-|---|---|---|
-| `scaffold` (default) | `data/processed/{dataset}/seed_{n}/` | `experiments/step{1,2}/{dataset}/seed_{n}/{ts}/` |
-| `random` | `data/processed/{dataset}/random/seed_{n}/` | `experiments/step{1,2}/{dataset}/random/seed_{n}/{ts}/` |
+The split name is the top path component everywhere:
 
-The scaffold family keeps the flat layout it was written to, so existing
-checkpoints and published scaffold numbers still resolve, and the two families
-can never land in the same directory. `src/data/datasets.py:_split_parts` is the
+```
+data/processed/{split}/{dataset}/seed_{n}/{dataset}_{train,valid,test}.csv
+experiments/{split}/step{1,2}/{dataset}/seed_{n}/{timestamp}/
+logs/{split}/step2/{timestamp}/
+```
+
+So a whole experiment family is one directory that can be copied, archived or
+deleted on its own, and no results table can silently mix scaffold numbers with
+random ones. `split_dir` and `experiment_name` in `src/data/datasets.py` are the
 one place this rule lives; `Get-SeedPath` in `run_all_seeds.ps1` mirrors it.
 
 The inner CV that scores GP and ES (`--n-folds`) stays scaffold-grouped under

@@ -157,7 +157,7 @@ def training_params(args: argparse.Namespace) -> dict[str, Any]:
 def load_split(dataset_name: str, split_seed: int, split: str = DEFAULT_SPLIT
                ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load the train/valid/test CSVs written by preprocess_data.py."""
-    seed_dir = split_dir(dataset_name, split_seed, split)
+    seed_dir = split_dir(split, dataset_name, split_seed)
     paths = {s: os.path.join(seed_dir, f'{dataset_name}_{s}.csv')
              for s in ('train', 'valid', 'test')}
     if any(not os.path.exists(p) for p in paths.values()):
@@ -221,8 +221,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     params = training_params(args)
     dataset_info = get_dataset_info(args.dataset)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = experiment_name('step1', args.dataset, params['split_seed'],
-                               params['split'], timestamp)
+    run_name = experiment_name(params['split'], 'step1', args.dataset,
+                               params['split_seed'], timestamp)
     out_dir = None if args.no_save else os.path.join(OUTPUT_DIR, run_name)
 
     print_header(args, params, dataset_info, out_dir, unimol_dir)
