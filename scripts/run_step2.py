@@ -14,6 +14,8 @@ Usage:
     python scripts/run_step2.py --dataset esol --split-seed 0
     python scripts/run_step2.py --dataset esol --split-seed 0 --gpu-id 1 \
         --init-checkpoint experiments/step1/esol/seed_0/<ts>/model_0.pth
+    python scripts/run_step2.py --dataset esol --split random --split-seed 0 \
+        --init-checkpoint experiments/step1/esol/random/seed_0/<ts>/model_0.pth
     python scripts/run_step2.py --help
 """
 
@@ -31,7 +33,12 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from scripts.run_step1 import load_split, resolve_unimol_source  # noqa: E402
 from src.data import DATASET_NAMES, get_dataset_info  # noqa: E402
-from src.data.datasets import OUTPUT_DIR  # noqa: E402
+from src.data.datasets import (  # noqa: E402
+    DEFAULT_SPLIT,
+    OUTPUT_DIR,
+    SPLIT_TYPES,
+    experiment_name,
+)
 from src.utils import Timer, print_banner  # noqa: E402
 
 
@@ -46,13 +53,18 @@ def build_parser() -> argparse.ArgumentParser:
                    default=argparse.SUPPRESS, help='dataset key from the registry')
 
     split = p.add_argument_group('data split')
+    split.add_argument('--split', default=DEFAULT_SPLIT, choices=SPLIT_TYPES,
+                       help='which split family to read; must match both '
+                            'preprocess_data.py and --init-checkpoint')
     split.add_argument('--split-seed', type=int, default=0,
-                       help='which scaffold split to train on')
+                       help='which split to train on')
     split.add_argument('--random-seed', type=int, default=42,
                        help='search seed; unrelated to --split-seed')
     split.add_argument('--n-folds', type=int, default=5,
-                       help='scaffold-grouped CV folds inside train; this CV is '
-                            'the fitness for both GP and ES')
+                       help='CV folds inside train; this CV is the fitness for '
+                            'both GP and ES. Always scaffold-grouped, even '
+                            'under --split random, since its job is to stop the '
+                            'search memorising scaffolds')
 
     head = p.add_argument_group('symbolic head')
     head.add_argument('--n-trees', type=int, default=16,
@@ -157,7 +169,8 @@ def print_header(args, info, out_dir, unimol_dir, device, vram_note) -> None:
         ('Dataset', f"{args.dataset} ({info['task_type']}, {info['metric']})"),
         ('unimol_tools', unimol_dir),
         ('Device', device),
-        ('Split / search seed', f'{args.split_seed} / {args.random_seed}'),
+        ('Split / search seed', f'{args.split} {args.split_seed} / '
+                                f'{args.random_seed}'),
         ('Head', f'{args.n_trees} trees x {512 // args.n_trees} dims, '
                  f'depth<={args.max_depth}, probe={args.use_probe}'),
         ('GP', f'pop={args.pop_size}/island, parsimony={args.parsimony}, '
@@ -206,7 +219,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_dir = None if args.no_save else os.path.join(
-        OUTPUT_DIR, 'step2', args.dataset, f'seed_{args.split_seed}', timestamp)
+        OUTPUT_DIR, experiment_name('step2', args.dataset, args.split_seed,
+                                    args.split, timestamp))
 
     set_clean_log_format()
     from unimol_tools.models.nnmodel import OUTPUT_DIM
@@ -233,7 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print_header(args, dataset_info, out_dir, unimol_dir, device,
                  '(after featurisation)')
 
-    train_df, valid_df, test_df = load_split(args.dataset, args.split_seed)
+    train_df, valid_df, test_df = load_split(args.dataset, args.split_seed,
+                                             args.split)
     print(f'\nData -- Train: {len(train_df)}, Valid: {len(valid_df)}, '
           f'Test: {len(test_df)}')
 
@@ -293,7 +308,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_dir or os.path.join(OUTPUT_DIR, 'step2', '_scratch'),
         metric=metric,
     )
-    with Timer(f'Step 2 {args.dataset} (split_seed={args.split_seed})'):
+    with Timer(f'Step 2 {args.dataset} '
+               f'({args.split} split_seed={args.split_seed})'):
         result = trainer.run()
 
     print('Learned formulas (best head):')

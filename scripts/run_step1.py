@@ -9,6 +9,7 @@ is no config file.
 Usage:
     python scripts/run_step1.py --dataset esol
     python scripts/run_step1.py --dataset esol --split-seed 2 --epochs 50
+    python scripts/run_step1.py --dataset esol --split random --split-seed 2
     python scripts/run_step1.py --dataset esol --gpu-id 1 --no-amp
 """
 
@@ -28,7 +29,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.data import DATASET_NAMES, get_dataset_info  # noqa: E402
-from src.data.datasets import OUTPUT_DIR, PROCESSED_DIR  # noqa: E402
+from src.data.datasets import (  # noqa: E402
+    DEFAULT_SPLIT,
+    OUTPUT_DIR,
+    SPLIT_TYPES,
+    experiment_name,
+    split_dir,
+)
 from src.models import Step1Trainer  # noqa: E402
 from src.utils import Timer, print_banner, save_json  # noqa: E402
 
@@ -53,8 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help='dataset key from the registry')
 
     split = parser.add_argument_group('data split')
+    split.add_argument('--split', default=DEFAULT_SPLIT, choices=SPLIT_TYPES,
+                       help='which split family to read; must match how '
+                            'preprocess_data.py was run')
     split.add_argument('--split-seed', type=int, default=0,
-                       help='which scaffold split to train on')
+                       help='which split to train on')
     split.add_argument('--random-seed', type=int, default=42,
                        help='training seed; unrelated to --split-seed')
 
@@ -144,17 +154,18 @@ def training_params(args: argparse.Namespace) -> dict[str, Any]:
 
 # ── Data ─────────────────────────────────────────────────────────────────
 
-def load_split(dataset_name: str, split_seed: int
+def load_split(dataset_name: str, split_seed: int, split: str = DEFAULT_SPLIT
                ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load the train/valid/test CSVs written by preprocess_data.py."""
-    seed_dir = os.path.join(PROCESSED_DIR, dataset_name, f'seed_{split_seed}')
+    seed_dir = split_dir(dataset_name, split_seed, split)
     paths = {s: os.path.join(seed_dir, f'{dataset_name}_{s}.csv')
              for s in ('train', 'valid', 'test')}
     if any(not os.path.exists(p) for p in paths.values()):
         raise FileNotFoundError(
             f'Data not found at {seed_dir}/\n'
             f'Run: python scripts/preprocess_data.py '
-            f'--dataset {dataset_name} --split-seed {split_seed}')
+            f'--dataset {dataset_name} --split {split} '
+            f'--split-seed {split_seed}')
     return tuple(pd.read_csv(paths[s]) for s in ('train', 'valid', 'test'))
 
 
@@ -179,7 +190,7 @@ def print_header(args: argparse.Namespace, params: dict[str, Any],
         ('Model', params['model_name']),
         ('unimol_tools', unimol_dir),
         ('Checkpoint', checkpoint_name(params['remove_hs'])),
-        ('Split seed', params['split_seed']),
+        ('Split', f"{params['split']} (seed {params['split_seed']})"),
         ('Random seed', params['random_seed']),
         ('Epochs', params['epochs']),
         ('Batch size', params['batch_size']),
@@ -210,24 +221,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     params = training_params(args)
     dataset_info = get_dataset_info(args.dataset)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    experiment_name = os.path.join(
-        'step1', args.dataset, f"seed_{params['split_seed']}", timestamp)
-    out_dir = None if args.no_save else os.path.join(OUTPUT_DIR, experiment_name)
+    run_name = experiment_name('step1', args.dataset, params['split_seed'],
+                               params['split'], timestamp)
+    out_dir = None if args.no_save else os.path.join(OUTPUT_DIR, run_name)
 
     print_header(args, params, dataset_info, out_dir, unimol_dir)
 
-    train_df, valid_df, test_df = load_split(args.dataset, params['split_seed'])
+    train_df, valid_df, test_df = load_split(
+        args.dataset, params['split_seed'], params['split'])
     print(f'\nData -- Train: {len(train_df)}, '
           f'Valid: {len(valid_df)}, Test: {len(test_df)}')
 
     set_clean_log_format()
     trainer = Step1Trainer(params=params, dataset_info=dataset_info,
-                           experiment_name=experiment_name)
+                           experiment_name=run_name)
 
-    with Timer(f"Training {args.dataset} (split_seed={params['split_seed']})"):
+    with Timer(f"Training {args.dataset} "
+               f"({params['split']} split_seed={params['split_seed']})"):
         results = trainer.run(train_df, valid_df, test_df)
 
     results.update({
+        'split': params['split'],
         'split_seed': params['split_seed'],
         'train_seed': params['random_seed'],
         'timestamp': timestamp,

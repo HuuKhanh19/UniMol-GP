@@ -128,16 +128,21 @@ python scripts/run_step2.py --dataset esol --split-seed 0 \
     --init-checkpoint experiments/step1/esol/seed_0/<timestamp>/model_0.pth
 ```
 
-For a full sweep, `scripts/run_all_seeds.ps1` runs one seed after another,
-resolving each seed's Step 1 checkpoint itself and writing one log per seed. It
-verifies the self-test, every processed split and every checkpoint *before* the
-first run starts, so a missing file fails in the first minute rather than after
-hours of GPU time, and it prints a per-seed valid/test summary at the end:
+For a full sweep, `scripts/run_all_seeds.ps1` runs one (dataset, seed) after
+another, resolving each one's Step 1 checkpoint itself and writing one log per
+run. It verifies the self-test, every processed split and every checkpoint
+*before* the first run starts, so a missing file fails in the first minute
+rather than after hours of GPU time, and it prints a per-run valid/test summary
+at the end:
 
 ```powershell
 .\scripts\run_all_seeds.ps1                                # 5 seeds, GPU 0
 .\scripts\run_all_seeds.ps1 -Seeds '0,2,4' -GpuId 0        # split across both
 .\scripts\run_all_seeds.ps1 -Seeds '1,3'   -GpuId 1        #   GPUs, run twice
+
+# the whole random-split matrix, one GPU per half
+.\scripts\run_all_seeds.ps1 -Split random -Dataset 'esol,freesolv' -GpuId 0
+.\scripts\run_all_seeds.ps1 -Split random -Dataset 'lipo,bace'     -GpuId 1
 ```
 
 A seed with no Step 1 checkpoint is skipped rather than quietly started from the
@@ -226,6 +231,30 @@ n_train = remainder            = 0.81 * N
 ```
 
 This is intentional — do not "fix" it to 80/10/10.
+
+### `--split scaffold` vs `--split random`
+
+`--split random` (`random_split`) draws molecules individually instead of in
+scaffold groups, on the same size budget. Test scaffolds are then seen in
+training, which makes it the easier, in-distribution control — expect better
+numbers than the scaffold protocol, and never compare the two families
+directly.
+
+The flag runs the whole way through `preprocess_data.py`, `run_step1.py` and
+`run_step2.py`, and picks the paths as well as the splitter:
+
+| `--split` | processed CSVs | runs |
+|---|---|---|
+| `scaffold` (default) | `data/processed/{dataset}/seed_{n}/` | `experiments/step{1,2}/{dataset}/seed_{n}/{ts}/` |
+| `random` | `data/processed/{dataset}/random/seed_{n}/` | `experiments/step{1,2}/{dataset}/random/seed_{n}/{ts}/` |
+
+The scaffold family keeps the flat layout it was written to, so existing
+checkpoints and published scaffold numbers still resolve, and the two families
+can never land in the same directory. `src/data/datasets.py:_split_parts` is the
+one place this rule lives; `Get-SeedPath` in `run_all_seeds.ps1` mirrors it.
+
+The inner CV that scores GP and ES (`--n-folds`) stays scaffold-grouped under
+both, since its job is to stop the search memorising scaffolds.
 
 ## Datasets
 

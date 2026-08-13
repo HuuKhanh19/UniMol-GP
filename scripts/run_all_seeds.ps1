@@ -1,21 +1,26 @@
 <#
 .SYNOPSIS
-    Sequential Step 2 sweep over scaffold split seeds, one log file per seed.
+    Sequential Step 2 sweep over datasets x split seeds, one log file per run.
 
 .DESCRIPTION
-    Runs scripts/run_step2.py once per split seed, each initialised from that
-    seed's own Step 1 checkpoint. Designed to be launched detached and left
-    overnight.
+    Runs scripts/run_step2.py once per (dataset, split seed), each initialised
+    from that pair's own Step 1 checkpoint. Designed to be launched detached and
+    left overnight.
 
     Everything that could waste the night is checked up front, before the first
-    run starts: the self-test, the processed split for every seed, and the
-    Step 1 checkpoint for every seed. A seed whose checkpoint is missing is
-    skipped loudly rather than silently falling back to the pretrained weights,
-    because starting ES from pretrained is a materially different (and much
-    harder) experiment whose numbers must not be mixed in with the rest.
+    run starts: the self-test, the processed split for every job, and the Step 1
+    checkpoint for every job. A job whose checkpoint is missing is skipped
+    loudly rather than silently falling back to the pretrained weights, because
+    starting ES from pretrained is a materially different (and much harder)
+    experiment whose numbers must not be mixed in with the rest.
+
+    -Split picks the split family and must match how preprocess_data.py and
+    run_step1.py were run. It also selects the paths: 'scaffold' uses the flat
+    seed_{n} layout, anything else nests under {split}/seed_{n}, so the two
+    families never share a directory.
 
 .EXAMPLE
-    # foreground, all five seeds on GPU 0
+    # foreground, all five scaffold seeds of ESOL on GPU 0
     .\scripts\run_all_seeds.ps1
 
 .EXAMPLE
@@ -24,7 +29,12 @@
         '-NoProfile','-ExecutionPolicy','Bypass','-File','scripts\run_all_seeds.ps1'
 
 .EXAMPLE
-    # both GPUs: launch twice, odd and even seeds
+    # the full random-split matrix, split across the two GPUs
+    .\scripts\run_all_seeds.ps1 -Split random -Dataset 'esol,freesolv' -GpuId 0
+    .\scripts\run_all_seeds.ps1 -Split random -Dataset 'lipo,bace'     -GpuId 1
+
+.EXAMPLE
+    # both GPUs on one dataset: launch twice, odd and even seeds
     .\scripts\run_all_seeds.ps1 -Seeds '0,2,4' -GpuId 0
     .\scripts\run_all_seeds.ps1 -Seeds '1,3'   -GpuId 1
 
@@ -33,8 +43,11 @@
     .\scripts\run_all_seeds.ps1 -ExtraArgs '--no-probe --es-pop 256'
 #>
 param(
+    # Comma-separated dataset keys, in the order they should run.
     [string]$Dataset = 'esol',
     [string]$Seeds = '0,1,2,3,4',
+    [ValidateSet('scaffold', 'random')]
+    [string]$Split = 'scaffold',
     [int]$GpuId = 0,
     [string]$LogDir = 'logs/step2',
     [switch]$SkipSelfTest,
@@ -48,6 +61,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
+$datasetList = $Dataset.Split(',') | ForEach-Object { $_.Trim() } |
+    Where-Object { $_ }
 $seedList = $Seeds.Split(',') | ForEach-Object { [int]$_.Trim() }
 # An explicit -LogDir is used verbatim, so the log paths are predictable enough
 # to tail by name. The default gets a timestamp so successive sweeps don't
@@ -57,6 +72,19 @@ if (-not $PSBoundParameters.ContainsKey('LogDir')) {
 }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $summaryPath = Join-Path $LogDir 'sweep.log'
+
+function Get-SeedPath {
+    <#
+      Directory for one (dataset, split, seed), mirroring _split_parts() in
+      src/data/datasets.py. Keep the two in step: the scaffold family stays in
+      the flat layout its existing checkpoints and results were written to.
+    #>
+    param([string]$Root, [string]$DatasetName, [string]$SplitName, [int]$Seed)
+    $parts = @($Root, $DatasetName)
+    if ($SplitName -ne 'scaffold') { $parts += $SplitName }
+    $parts += "seed_$Seed"
+    return ($parts -join '/')
+}
 
 function Invoke-Logged {
     <#
@@ -82,7 +110,7 @@ function Write-Log($message) {
     Add-Content -Path $summaryPath -Value $line
 }
 
-Write-Log "step 2 sweep: dataset=$Dataset seeds=$Seeds gpu=$GpuId"
+Write-Log "step 2 sweep: split=$Split datasets=$Dataset seeds=$Seeds gpu=$GpuId"
 Write-Log "logs -> $LogDir"
 
 # --- pre-flight ------------------------------------------------------------
@@ -90,24 +118,28 @@ Write-Log "logs -> $LogDir"
 # minute rather than at 3am after four hours of GPU time.
 $plan = @()
 $skipped = @()
-foreach ($seed in $seedList) {
-    $splitDir = "data/processed/$Dataset/seed_$seed"
-    if (-not (Test-Path "$splitDir/${Dataset}_train.csv")) {
-        $skipped += "seed $seed - no split at $splitDir (run preprocess_data.py)"
-        continue
+foreach ($ds in $datasetList) {
+    foreach ($seed in $seedList) {
+        $splitDir = Get-SeedPath 'data/processed' $ds $Split $seed
+        if (-not (Test-Path "$splitDir/${ds}_train.csv")) {
+            $skipped += "$ds seed $seed - no split at $splitDir (run preprocess_data.py --split $Split)"
+            continue
+        }
+        $ckptRoot = Get-SeedPath 'experiments/step1' $ds $Split $seed
+        $ckpt = $null
+        if (Test-Path $ckptRoot) {
+            $ckpt = Get-ChildItem -Path $ckptRoot -Filter 'model_0.pth' -Recurse `
+                -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        }
+        if ($null -eq $ckpt) {
+            $skipped += "$ds seed $seed - no step 1 checkpoint under $ckptRoot"
+            continue
+        }
+        $plan += [pscustomobject]@{
+            Dataset = $ds; Seed = $seed; Checkpoint = $ckpt.FullName
+        }
     }
-    $ckptRoot = "experiments/step1/$Dataset/seed_$seed"
-    $ckpt = $null
-    if (Test-Path $ckptRoot) {
-        $ckpt = Get-ChildItem -Path $ckptRoot -Filter 'model_0.pth' -Recurse `
-            -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    }
-    if ($null -eq $ckpt) {
-        $skipped += "seed $seed - no step 1 checkpoint under $ckptRoot"
-        continue
-    }
-    $plan += [pscustomobject]@{ Seed = $seed; Checkpoint = $ckpt.FullName }
 }
 
 foreach ($reason in $skipped) { Write-Log "SKIP  $reason" }
@@ -116,7 +148,7 @@ if ($plan.Count -eq 0) {
     exit 1
 }
 foreach ($job in $plan) {
-    Write-Log ("plan  seed {0} <- {1}" -f $job.Seed, $job.Checkpoint)
+    Write-Log ("plan  {0} seed {1} <- {2}" -f $job.Dataset, $job.Seed, $job.Checkpoint)
 }
 
 if (-not $SkipSelfTest) {
@@ -133,14 +165,16 @@ if (-not $SkipSelfTest) {
 # --- sweep -----------------------------------------------------------------
 $results = @()
 foreach ($job in $plan) {
+    $ds = $job.Dataset
     $seed = $job.Seed
-    $log = Join-Path $LogDir "${Dataset}_seed${seed}.log"
-    Write-Log "start seed $seed -> $log"
+    $log = Join-Path $LogDir "${ds}_${Split}_seed${seed}.log"
+    Write-Log "start $ds seed $seed -> $log"
     $t0 = Get-Date
 
     $argv = @(
         '-u', 'scripts/run_step2.py',
-        '--dataset', $Dataset,
+        '--dataset', $ds,
+        '--split', $Split,
         '--split-seed', $seed,
         '--gpu-id', $GpuId,
         '--init-checkpoint', $job.Checkpoint
@@ -152,25 +186,32 @@ foreach ($job in $plan) {
 
     $mins = ((Get-Date) - $t0).TotalMinutes
     $status = if ($code -eq 0) { 'ok' } else { "FAILED (exit $code)" }
-    Write-Log ("done  seed {0}: {1} in {2:N1} min" -f $seed, $status, $mins)
-    $results += [pscustomobject]@{ Seed = $seed; Status = $status; Minutes = $mins }
+    Write-Log ("done  {0} seed {1}: {2} in {3:N1} min" -f $ds, $seed, $status, $mins)
+    $results += [pscustomobject]@{
+        Dataset = $ds; Seed = $seed; Status = $status; Minutes = $mins
+    }
 }
 
 # --- summary ---------------------------------------------------------------
 Write-Log '--- sweep finished ---'
 foreach ($r in $results) {
-    Write-Log ("seed {0}: {1} ({2:N1} min)" -f $r.Seed, $r.Status, $r.Minutes)
+    Write-Log ("{0} seed {1}: {2} ({3:N1} min)" -f `
+        $r.Dataset, $r.Seed, $r.Status, $r.Minutes)
 }
 
 # Pull the best validation/test numbers straight out of each results.json so the
-# morning check is one file, not five directory hunts.
-Write-Log '--- best per seed (valid-selected) ---'
+# morning check is one file, not a directory hunt per run.
+Write-Log '--- best per run (valid-selected) ---'
 foreach ($r in $results) {
     if ($r.Status -ne 'ok') { continue }
-    $json = Get-ChildItem -Path "experiments/step2/$Dataset/seed_$($r.Seed)" `
-        -Filter 'results.json' -Recurse -ErrorAction SilentlyContinue |
+    $root = Get-SeedPath 'experiments/step2' $r.Dataset $Split $r.Seed
+    $json = Get-ChildItem -Path $root -Filter 'results.json' -Recurse `
+        -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($null -eq $json) { Write-Log ("seed {0}: no results.json" -f $r.Seed); continue }
+    if ($null -eq $json) {
+        Write-Log ("{0} seed {1}: no results.json" -f $r.Dataset, $r.Seed)
+        continue
+    }
     $res = Get-Content $json.FullName -Raw | ConvertFrom-Json
     $best = $res.best
     # valid_score/test_score are metric-agnostic; fall back to the rmse keys so
@@ -178,7 +219,7 @@ foreach ($r in $results) {
     $v = if ($null -ne $best.valid_score) { $best.valid_score } else { $best.valid_rmse }
     $t = if ($null -ne $best.test_score)  { $best.test_score }  else { $best.test_rmse }
     $m = if ($res.metric) { $res.metric } else { 'rmse' }
-    Write-Log ("seed {0}: valid={1:N4} test={2:N4} [{3}] (phase {4})" -f `
-        $r.Seed, $v, $t, $m, $best.phase)
+    Write-Log ("{0} seed {1}: valid={2:N4} test={3:N4} [{4}] (phase {5})" -f `
+        $r.Dataset, $r.Seed, $v, $t, $m, $best.phase)
 }
 Write-Log "summary written to $summaryPath"

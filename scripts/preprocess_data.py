@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 """
-Preprocess: clean raw CSVs and write Bemis-Murcko scaffold splits.
+Preprocess: clean raw CSVs and write train/valid/test splits.
 
 All configuration lives in argparse, like run_step1.py. There is no config file.
 
 Output: data/processed/{dataset}/seed_{n}/{dataset}_{train,valid,test}.csv
+        data/processed/{dataset}/random/seed_{n}/... for --split random
 
 Usage:
     python scripts/preprocess_data.py --dataset esol
     python scripts/preprocess_data.py --dataset esol --split-seed 0 1 2 3 4
     python scripts/preprocess_data.py --dataset all --split-seed 0 1 2 3 4
+    python scripts/preprocess_data.py --dataset all --split random \
+        --split-seed 0 1 2 3 4
 """
 
 from __future__ import annotations
@@ -23,20 +26,28 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.data import DATASET_NAMES, prepare_dataset  # noqa: E402
-from src.data.datasets import PROCESSED_DIR, RAW_DIR, SPLIT_RATIO  # noqa: E402
+from src.data.datasets import (  # noqa: E402
+    DEFAULT_SPLIT,
+    RAW_DIR,
+    SPLIT_RATIO,
+    SPLIT_TYPES,
+    split_dir,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='preprocess_data.py',
-        description='Clean raw CSVs and write scaffold splits.',
+        description='Clean raw CSVs and write train/valid/test splits.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('--dataset', default='all',
                         choices=['all'] + DATASET_NAMES,
                         help="dataset key, or 'all' for every registered one")
+    parser.add_argument('--split', default=DEFAULT_SPLIT, choices=SPLIT_TYPES,
+                        help='scaffold-grouped split, or plain random')
     parser.add_argument('--split-seed', type=int, nargs='+', default=[0],
-                        help='one or more scaffold-split seeds')
+                        help='one or more split seeds')
     return parser
 
 
@@ -45,15 +56,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
-def preprocess(dataset_name: str, split_seed: int) -> tuple[int, int, int]:
+def preprocess(dataset_name: str, split_seed: int,
+               split: str = DEFAULT_SPLIT) -> tuple[int, int, int]:
     """Split one dataset at one seed and write the three CSVs."""
     train_df, valid_df, test_df, _ = prepare_dataset(
         dataset_name, raw_dir=RAW_DIR,
-        split_ratio=SPLIT_RATIO, split_seed=split_seed,
+        split_ratio=SPLIT_RATIO, split_seed=split_seed, split=split,
     )
     frames = (('train', train_df), ('valid', valid_df), ('test', test_df))
 
-    out_dir = os.path.join(PROCESSED_DIR, dataset_name, f'seed_{split_seed}')
+    out_dir = split_dir(dataset_name, split_seed, split)
     os.makedirs(out_dir, exist_ok=True)
     for name, df in frames:
         df.to_csv(os.path.join(out_dir, f'{dataset_name}_{name}.csv'),
@@ -69,15 +81,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     datasets: list[str] = (DATASET_NAMES if args.dataset == 'all'
                            else [args.dataset])
-    print(f'\nPreprocessing | datasets={datasets} | seeds={args.split_seed}')
+    print(f'\nPreprocessing | datasets={datasets} | split={args.split} '
+          f'| seeds={args.split_seed}')
     print('=' * 60)
 
     failed = 0
     for dataset in datasets:
         for seed in args.split_seed:
-            print(f'\n{dataset.upper()} (split_seed={seed})')
+            print(f'\n{dataset.upper()} ({args.split} split, split_seed={seed})')
             try:
-                n_train, n_valid, n_test = preprocess(dataset, seed)
+                n_train, n_valid, n_test = preprocess(dataset, seed, args.split)
             except FileNotFoundError as exc:
                 print(f'  Skipped: {exc}')
                 failed += 1

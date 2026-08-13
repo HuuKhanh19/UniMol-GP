@@ -1,7 +1,7 @@
 """
 Data loading and preprocessing.
 
-Loads raw CSV, cleans SMILES, applies scaffold split.
+Loads raw CSV, cleans SMILES, applies the requested split.
 No dependency on config files — all parameters passed directly.
 """
 
@@ -11,8 +11,12 @@ import os
 
 import pandas as pd
 
-from .datasets import get_dataset_info
-from .splitters import random_scaffold_split
+from .datasets import DEFAULT_SPLIT, get_dataset_info
+from .splitters import random_scaffold_split, random_split
+
+#: Split name (as used on the command line) -> splitter. Both take the same
+#: arguments, so prepare_dataset only has to pick one.
+SPLITTERS = {'scaffold': random_scaffold_split, 'random': random_split}
 
 
 def load_raw_data(raw_dir: str, filename: str) -> pd.DataFrame:
@@ -75,19 +79,23 @@ def prepare_dataset(
     raw_dir: str = "data/raw",
     split_ratio: tuple = (0.8, 0.1, 0.1),
     split_seed: int = 0,
+    split: str = DEFAULT_SPLIT,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     """
-    Load, preprocess, and scaffold-split a dataset.
+    Load, preprocess, and split a dataset.
 
     Args:
         dataset_name: Key in DATASET_REGISTRY.
         raw_dir: Directory with raw CSV files.
         split_ratio: (train, valid, test) fractions.
-        split_seed: Random seed for scaffold shuffling.
+        split_seed: Random seed for the split shuffling.
+        split: Which splitter to use — see SPLITTERS.
 
     Returns:
         (train_df, valid_df, test_df, dataset_info)
     """
+    if split not in SPLITTERS:
+        raise KeyError(f"Unknown split '{split}'. Available: {list(SPLITTERS)}")
     info = get_dataset_info(dataset_name)
 
     df = load_raw_data(raw_dir, info['file'])
@@ -99,7 +107,7 @@ def prepare_dataset(
     print(f"After preprocessing: {len(df)} molecules")
 
     smiles_list = df['smiles'].tolist()
-    train_df, valid_df, test_df = random_scaffold_split(
+    train_df, valid_df, test_df = SPLITTERS[split](
         dataset=df,
         smiles_list=smiles_list,
         random_seed=split_seed,
