@@ -198,7 +198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from src.es.data import MoleculeData
     from src.es.eggroll import ESConfig
-    from src.es.forward_unimol import ESSpec, SplitUniMol
+    from src.es.forward_unimol import ATTN_PEAK_TENSORS, ESSpec, SplitUniMol
     from src.head.gp import GPConfig
     from src.train.stage2 import Stage2Config, Stage2Trainer
 
@@ -271,7 +271,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Checked against *free* VRAM rather than card size: the card may be shared,
     # and an OOM four hours into an overnight sweep costs the whole night.
     seq = int(splits['train'].n_atoms.max())
-    gb = split.attn_bytes(args.es_chunk, args.mol_tile, seq) * 3 / 1024 ** 3
+    gb = (split.attn_bytes(args.es_chunk, args.mol_tile, seq)
+          * ATTN_PEAK_TENSORS / 1024 ** 3)
     free = (torch.cuda.mem_get_info(device)[0] / 1024 ** 3
             if device.type == 'cuda' else float('inf'))
     print(f'Longest molecule: {seq} atoms -> ~{gb:.1f} GB attention peak '

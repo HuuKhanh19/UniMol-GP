@@ -39,6 +39,15 @@ MATRIX_NAMES = ('in_proj', 'out_proj', 'fc1', 'fc2')
 #: ones where masking A by head region is meaningful (see ``ESSpec.region_mask``).
 OUTPUT_SIDE = ('out_proj', 'fc2')
 
+#: Score-sized tensors alive at the peak of one ``suffix`` layer, by tracing the
+#: loop: on entering layer i+1, layer i's ``bias`` and ``probs`` are both still
+#: referenced (``probs`` is only rebound after the next softmax), then ``bmm``
+#: allocates fresh ``scores`` and ``scores + bias`` allocates its result before
+#: the operands are released. Four, not the three an earlier estimate assumed --
+#: which under-predicted by a third and let a 16 GB card clear pre-flight and
+#: then OOM in the first ES phase.
+ATTN_PEAK_TENSORS = 4
+
 
 @dataclass
 class ESSpec:
@@ -296,9 +305,9 @@ class SplitUniMol:
     def attn_bytes(self, n_members: int, n_mol: int, seq: int) -> int:
         """Bytes for one attention-score tensor -- the memory driver.
 
-        Peak is roughly 3x this (running bias, fresh scores, softmax output),
-        and it grows with ``N * B * S^2``, so shrinking the molecule tile is the
-        cheapest knob when a chunk does not fit.
+        Peak is ``ATTN_PEAK_TENSORS`` times this, and it grows with
+        ``N * B * S^2``, so shrinking the population chunk or the molecule tile
+        is the cheapest knob when a chunk does not fit.
         """
         return (
             n_members * n_mol * self.heads * seq * seq
